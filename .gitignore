@@ -1,0 +1,14 @@
+# Сборочные артефакты
+/dist/
+/bin/
+*.exe
+*.test
+
+# Локальные настройки
+*.log
+*.tmp
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
