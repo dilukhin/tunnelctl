@@ -7,10 +7,8 @@ import (
 	"tunnelctl/internal/app"
 )
 
-var version = "0.1.0-mvp"
-
 func main() {
-	if err := app.Run(os.Args[1:], version); err != nil {
+	if err := app.Run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "Ошибка: %v\n", err)
 		os.Exit(1)
 	}
