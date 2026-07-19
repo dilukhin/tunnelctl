@@ -21,22 +21,9 @@ import (
 	"tunnelctl/internal/logx"
 )
 
-// Run запускает SSH как дочерний процесс без -f и контролирует его через health-check.
+// Run запускает одиночный профиль. В режиме watch профиль переподключается к тому же VPS.
 func Run(ctx context.Context, cfg config.Config, p config.Profile, watch bool) error {
-	if err := validateListen(p.EffectiveListen(cfg), cfg.Defaults.AllowListenAllHosts); err != nil {
-		return err
-	}
-	if _, err := exec.LookPath("ssh"); err != nil {
-		return fmt.Errorf("не найден ssh. Установи OpenSSH. Команды: Termux: pkg install openssh; Ubuntu/Debian: sudo apt install openssh-client; Windows: winget install --id Microsoft.OpenSSH.Beta -e")
-	}
-	minDelay := time.Duration(cfg.Defaults.Reconnect.MinDelaySec) * time.Second
-	maxDelay := time.Duration(cfg.Defaults.Reconnect.MaxDelaySec) * time.Second
-	if minDelay <= 0 {
-		minDelay = 2 * time.Second
-	}
-	if maxDelay < minDelay {
-		maxDelay = minDelay
-	}
+	minDelay, maxDelay := reconnectBounds(cfg)
 	delay := minDelay
 	for {
 		select {
@@ -44,7 +31,7 @@ func Run(ctx context.Context, cfg config.Config, p config.Profile, watch bool) e
 			return nil
 		default:
 		}
-		err := runOnce(ctx, cfg, p, watch)
+		err := RunOnce(ctx, cfg, p, watch)
 		if !watch || !cfg.Defaults.Reconnect.Enabled {
 			return err
 		}
@@ -55,7 +42,7 @@ func Run(ctx context.Context, cfg config.Config, p config.Profile, watch bool) e
 			fmt.Println("Туннель завершился с ошибкой:", err)
 			logx.Warn("туннель завершился с ошибкой: %v", err)
 		}
-		fmt.Printf("Повторное подключение через %s...\n", delay)
+		fmt.Printf("Повторное подключение к тому же профилю через %s...\n", delay)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -66,6 +53,30 @@ func Run(ctx context.Context, cfg config.Config, p config.Profile, watch bool) e
 			delay = maxDelay
 		}
 	}
+}
+
+// RunOnce запускает профиль один раз и возвращает управление при завершении ssh или падении health-check.
+// Для failover-групп вызывающая сторона использует эту функцию, чтобы после ошибки перейти к следующему VPS.
+func RunOnce(ctx context.Context, cfg config.Config, p config.Profile, watch bool) error {
+	if err := validateListen(p.EffectiveListen(cfg), cfg.Defaults.AllowListenAllHosts); err != nil {
+		return err
+	}
+	if _, err := exec.LookPath("ssh"); err != nil {
+		return fmt.Errorf("не найден ssh. Установи OpenSSH. Команды: Termux: pkg install openssh; Ubuntu/Debian: sudo apt install openssh-client; Windows: winget install --id Microsoft.OpenSSH.Beta -e")
+	}
+	return runOnce(ctx, cfg, p, watch)
+}
+
+func reconnectBounds(cfg config.Config) (time.Duration, time.Duration) {
+	minDelay := time.Duration(cfg.Defaults.Reconnect.MinDelaySec) * time.Second
+	maxDelay := time.Duration(cfg.Defaults.Reconnect.MaxDelaySec) * time.Second
+	if minDelay <= 0 {
+		minDelay = 2 * time.Second
+	}
+	if maxDelay < minDelay {
+		maxDelay = minDelay
+	}
+	return minDelay, maxDelay
 }
 
 func runOnce(ctx context.Context, cfg config.Config, p config.Profile, watch bool) error {
@@ -125,7 +136,7 @@ func runOnce(ctx context.Context, cfg config.Config, p config.Profile, watch boo
 				fmt.Println("Проверка прокси не прошла:", err)
 				logx.Warn("проверка прокси не прошла: %v", err)
 				if fails >= 2 {
-					fmt.Println("Убиваю зависший SSH-процесс и переподключаюсь.")
+					fmt.Println("Убиваю зависший SSH-процесс и возвращаю ошибку супервизору.")
 					killProcess(cmd)
 					return errors.New("прокси не работает")
 				}
