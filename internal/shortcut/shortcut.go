@@ -72,8 +72,6 @@ Terminal=true
 Categories=Network;
 `, target, target, exe, target)
 		fmt.Println("Создаю .desktop файл:", path)
-		fmt.Println("Команда:")
-		fmt.Printf("  cat > %q <<'EOF'\n%sEOF\n", path, body)
 		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 			return err
 		}
@@ -95,29 +93,11 @@ func createTermuxShortcuts(in *bufio.Reader, cfg config.Config) error {
 		path := filepath.Join(shortDir, "tunnelctl-"+safeFile(target)+".sh")
 		body := fmt.Sprintf("#!/data/data/com.termux/files/usr/bin/bash\n%s connect %s\n", shellQuote(exe), shellQuote(target))
 		fmt.Println("Создаю скрипт для Termux:Widget:", path)
-		fmt.Println("Команда:")
-		fmt.Printf("  cat > %q <<'EOF'\n%sEOF\n  chmod +x %q\n", path, body, path)
-		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
-			return err
-		}
-	}
-	if ask(in, "Создать скрипт автозапуска Termux:Boot для connect auto?", false) {
-		bootDir := filepath.Join(home, ".termux", "boot")
-		if err := os.MkdirAll(bootDir, 0o700); err != nil {
-			return err
-		}
-		path := filepath.Join(bootDir, "tunnelctl-auto.sh")
-		body := fmt.Sprintf("#!/data/data/com.termux/files/usr/bin/bash\nif command -v termux-wake-lock >/dev/null 2>&1; then termux-wake-lock; fi\n%s connect auto --watch >> %s 2>&1 &\n", shellQuote(exe), shellQuote(filepath.Join(home, "tunnelctl-boot.log")))
-		fmt.Println("Создаю скрипт Termux:Boot:", path)
-		fmt.Println("Команда:")
-		fmt.Printf("  mkdir -p %q && cat > %q <<'EOF'\n%sEOF\n  chmod +x %q\n", bootDir, path, body, path)
 		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
 			return err
 		}
 	}
 	fmt.Println("Для ярлыков на домашнем экране установи Termux:Widget и добавь виджет с папкой .shortcuts.")
-	fmt.Println("Команда установки Termux-пакета API при необходимости:")
-	fmt.Println("  pkg install termux-api")
 	return nil
 }
 
@@ -171,17 +151,3 @@ func safeFile(s string) string {
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-
-func ask(in *bufio.Reader, q string, def bool) bool {
-	suffix := "[Y/n]"
-	if !def {
-		suffix = "[y/N]"
-	}
-	fmt.Printf("%s %s ", q, suffix)
-	line, _ := in.ReadString('\n')
-	line = strings.TrimSpace(strings.ToLower(line))
-	if line == "" {
-		return def
-	}
-	return line == "y" || line == "yes" || line == "д" || line == "да"
-}

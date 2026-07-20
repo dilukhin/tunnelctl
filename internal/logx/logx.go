@@ -52,17 +52,9 @@ func Close() {
 	}
 }
 
-func Info(format string, args ...any) {
-	write("ИНФО", format, args...)
-}
-
-func Warn(format string, args ...any) {
-	write("ПРЕДУПРЕЖДЕНИЕ", format, args...)
-}
-
-func Error(format string, args ...any) {
-	write("ОШИБКА", format, args...)
-}
+func Info(format string, args ...any)  { write("ИНФО", format, args...) }
+func Warn(format string, args ...any)  { write("ПРЕДУПРЕЖДЕНИЕ", format, args...) }
+func Error(format string, args ...any) { write("ОШИБКА", format, args...) }
 
 func write(level, format string, args ...any) {
 	mu.Lock()

@@ -8,20 +8,23 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"tunnelctl/internal/autostart"
 	"tunnelctl/internal/bootstrap"
 	"tunnelctl/internal/config"
 	"tunnelctl/internal/logx"
 	"tunnelctl/internal/paths"
 	"tunnelctl/internal/sshproxy"
+	"tunnelctl/internal/supervisor"
 )
 
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 func Run(args []string) error {
 	if err := logx.Init(); err != nil {
@@ -40,6 +43,12 @@ func Run(args []string) error {
 		return cmdDoctor(args[1:])
 	case "status":
 		return cmdStatus(args[1:])
+	case "stop":
+		return cmdStop(args[1:])
+	case "switch":
+		return cmdSwitch(args[1:])
+	case "autostart":
+		return cmdAutostart(args[1:])
 	case "help", "--help", "-h":
 		printHelp()
 		return nil
@@ -51,44 +60,49 @@ func Run(args []string) error {
 	}
 }
 
-func cmdBootstrap(args []string) error {
-	configPath := ""
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "--config" || a == "-config":
-			if i+1 >= len(args) {
-				return errors.New("после --config нужен путь")
-			}
-			configPath = args[i+1]
-			i++
-		case strings.HasPrefix(a, "--config="):
-			configPath = strings.TrimPrefix(a, "--config=")
-		case strings.HasPrefix(a, "-config="):
-			configPath = strings.TrimPrefix(a, "-config=")
-		default:
-			return fmt.Errorf("неизвестный аргумент bootstrap: %s", a)
-		}
-	}
-	return bootstrap.Run(configPath)
-}
-
 func printHelp() {
 	fmt.Println(`tunnelctl — локальный SOCKS5 поверх SSH
 
 Команды:
-  tunnelctl                         показать меню выбора
-  tunnelctl bootstrap               мастер настройки
-  tunnelctl connect <имя>           подключиться к профилю или группе
-  tunnelctl connect <имя> --watch   держать соединение и переподключаться
+  tunnelctl                          показать меню выбора
+  tunnelctl bootstrap                мастер настройки
+  tunnelctl connect <имя>            подключиться к профилю или группе
+  tunnelctl connect <имя> --watch    держать соединение и переподключаться
   tunnelctl connect <имя> --no-watch один запуск без автоматического повтора
-  tunnelctl doctor                  проверить окружение и конфиг
-  tunnelctl status                  проверить локальный SOCKS-порт
-  tunnelctl version                 версия
+  tunnelctl status                   состояние управляемого туннеля и SOCKS
+  tunnelctl switch <профиль>         переключиться на указанный профиль
+  tunnelctl switch next              перейти к следующему профилю группы
+  tunnelctl stop                     корректно остановить управляемый туннель
+  tunnelctl autostart install <имя>  установить автозапуск
+  tunnelctl autostart status         состояние механизма автозапуска
+  tunnelctl autostart start          запустить установленный механизм
+  tunnelctl autostart stop           остановить установленный механизм
+  tunnelctl autostart remove         удалить автозапуск
+  tunnelctl autostart print <имя>    показать создаваемый объект
+  tunnelctl doctor                   проверить окружение и конфиг
+  tunnelctl version                  версия
+
+Общие параметры:
+  --config <путь>                    явный путь к конфигурации
+
+Параметры autostart install/print:
+  --dry-run                          только предварительный просмотр
+  --system                           системная служба Linux
+  --run-as <пользователь>            пользователь системной службы Linux
 
 Примеры:
-  tunnelctl connect yandex --watch
-  tunnelctl connect auto --watch`)
+  tunnelctl connect auto --watch
+  tunnelctl switch next
+  tunnelctl autostart install auto --dry-run
+  tunnelctl autostart install auto --config /home/user/.config/tunnelctl/tunnelctl.json`)
+}
+
+func cmdBootstrap(args []string) error {
+	configPath, err := parseOnlyConfig("bootstrap", args)
+	if err != nil {
+		return err
+	}
+	return bootstrap.Run(configPath)
 }
 
 func interactive(configPath string) error {
@@ -121,7 +135,7 @@ func interactive(configPath string) error {
 			name = p.Alias
 		}
 		items = append(items, name)
-		fmt.Printf("  %d. %s -> %s@%s, SOCKS %s\n", len(items), name, p.User, p.Address(), p.EffectiveListen(cfg))
+		fmt.Printf("  %d. %s, SOCKS %s\n", len(items), name, p.EffectiveListen(cfg))
 	}
 	fmt.Print("Номер или имя: ")
 	line, _ := reader.ReadString('\n')
@@ -132,19 +146,430 @@ func interactive(configPath string) error {
 	if n, err := strconv.Atoi(line); err == nil && n >= 1 && n <= len(items) {
 		line = items[n-1]
 	}
-	return connectByName(cfg, line, true)
+	return connectByName(cfg, config.EffectivePath(configPath), line, true)
 }
 
-func cmdConnect(args []string) error {
-	configPath := ""
-	watch := true
-	name := ""
+type connectArgs struct {
+	configPath string
+	watch      bool
+	name       string
+}
+
+func parseConnectArgs(args []string) (connectArgs, error) {
+	parsed := connectArgs{watch: true}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--config" || a == "-config":
 			if i+1 >= len(args) {
-				return errors.New("после --config нужен путь")
+				return parsed, errors.New("после --config нужен путь")
+			}
+			parsed.configPath = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--config="):
+			parsed.configPath = strings.TrimPrefix(a, "--config=")
+		case strings.HasPrefix(a, "-config="):
+			parsed.configPath = strings.TrimPrefix(a, "-config=")
+		case a == "--watch" || a == "-watch" || a == "--watch=true" || a == "-watch=true":
+			parsed.watch = true
+		case a == "--no-watch" || a == "-no-watch" || a == "--watch=false" || a == "-watch=false":
+			parsed.watch = false
+		case strings.HasPrefix(a, "-"):
+			return parsed, fmt.Errorf("неизвестный аргумент connect: %s", a)
+		default:
+			if parsed.name != "" {
+				return parsed, fmt.Errorf("лишний аргумент connect: %s", a)
+			}
+			parsed.name = a
+		}
+	}
+	if parsed.name == "" {
+		return parsed, errors.New("нужно указать имя профиля, алиас или группу")
+	}
+	return parsed, nil
+}
+
+func cmdConnect(args []string) error {
+	parsed, err := parseConnectArgs(args)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(parsed.configPath)
+	if err != nil {
+		return err
+	}
+	return connectByName(cfg, config.EffectivePath(parsed.configPath), parsed.name, parsed.watch)
+}
+
+func connectByName(cfg config.Config, configPath, name string, watch bool) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if _, ok := cfg.ResolveTarget(name); !ok {
+		return fmt.Errorf("профиль или группа не найдены: %s", name)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return supervisor.Run(ctx, supervisor.Options{
+		Config:     cfg,
+		ConfigPath: configPath,
+		Target:     name,
+		Watch:      watch,
+	})
+}
+
+func cmdStatus(args []string) error {
+	configPath, err := parseOnlyConfig("status", args)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	state, stateErr := supervisor.Status(ctx)
+	if stateErr == nil {
+		fmt.Println("Управляемый tunnelctl: запущен")
+		fmt.Println("PID:", state.PID)
+		fmt.Println("Исходная цель:", state.OriginalTarget, "("+state.OriginalType+")")
+		fmt.Println("Активный профиль:", emptyAs(state.ActiveProfile, "не определён"))
+		fmt.Println("Локальный SOCKS:", emptyAs(state.Listen, "не определён"))
+		fmt.Println("Состояние:", state.Status)
+		if !state.LastHealthSuccess.IsZero() {
+			fmt.Println("Последняя успешная проверка:", state.LastHealthSuccess.Format(time.RFC3339))
+		}
+		if state.LastHealthError != "" {
+			fmt.Println("Последняя ошибка проверки:", state.LastHealthError)
+		}
+		fmt.Println("Лог:", state.LogPath)
+		return printCurrentHealth(state, configPath)
+	}
+
+	fmt.Println("Управляемый tunnelctl сейчас не запущен.")
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("не удалось прочитать конфигурацию для проверки SOCKS: %w", err)
+	}
+	addr := cfg.Defaults.Listen
+	conn, dialErr := net.DialTimeout("tcp", addr, 2*time.Second)
+	if dialErr != nil {
+		fmt.Println("Локальный SOCKS не отвечает на", addr)
+		return nil
+	}
+	_ = conn.Close()
+	fmt.Println("Локальный порт открыт:", addr)
+	fmt.Println("Принадлежность процесса tunnelctl не подтверждена.")
+	if err := sshproxy.CheckHTTPViaSocks(addr, cfg.Defaults.HealthURL, time.Duration(cfg.Defaults.HealthTimeoutSec)*time.Second); err != nil {
+		fmt.Println("Проверка прокси не прошла:", err)
+	} else {
+		fmt.Println("Проверка прокси успешна, но владелец SOCKS-порта не определён.")
+	}
+	return nil
+}
+
+func printCurrentHealth(state supervisor.State, overrideConfigPath string) error {
+	configPath := state.ConfigPath
+	if overrideConfigPath != "" {
+		configPath = overrideConfigPath
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Println("Текущая проверка работоспособности: не выполнена:", err)
+		return nil
+	}
+	p, ok := cfg.ProfileByName(state.ActiveProfile)
+	if !ok {
+		fmt.Println("Текущая проверка работоспособности: активный профиль отсутствует в конфигурации")
+		return nil
+	}
+	err = sshproxy.CheckHTTPViaSocks(p.EffectiveListen(cfg), p.EffectiveHealthURL(cfg), time.Duration(cfg.Defaults.HealthTimeoutSec)*time.Second)
+	if err != nil {
+		fmt.Println("Текущая проверка работоспособности: ошибка:", err)
+	} else {
+		fmt.Println("Текущая проверка работоспособности: успешно")
+	}
+	return nil
+}
+
+func cmdStop(args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("лишний аргумент stop: %s", args[0])
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	message, err := supervisor.Stop(ctx)
+	if err != nil {
+		return fmt.Errorf("управляемый tunnelctl сейчас не запущен или недоступен: %w", err)
+	}
+	fmt.Println(message)
+	return nil
+}
+
+func cmdSwitch(args []string) error {
+	if len(args) == 0 {
+		return errors.New("нужно указать профиль, алиас или next")
+	}
+	if len(args) > 1 {
+		return fmt.Errorf("лишний аргумент switch: %s", args[1])
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	state, message, err := supervisor.Switch(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	if message != "" {
+		fmt.Println(message)
+	}
+	if state.Listen != "" {
+		fmt.Println("SOCKS5 слушает", state.Listen)
+	}
+	if !state.LastHealthSuccess.IsZero() {
+		fmt.Println("Проверка прокси успешна.")
+	}
+	return nil
+}
+
+type autostartArgs struct {
+	action     string
+	target     string
+	configPath string
+	dryRun     bool
+	system     bool
+	runAs      string
+}
+
+func parseAutostartArgs(args []string) (autostartArgs, error) {
+	var parsed autostartArgs
+	if len(args) == 0 {
+		return parsed, errors.New("нужно указать действие autostart")
+	}
+	parsed.action = args[0]
+	switch parsed.action {
+	case "install", "status", "start", "stop", "remove", "print":
+	default:
+		return parsed, fmt.Errorf("неизвестное действие autostart: %s", parsed.action)
+	}
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--config" || a == "-config":
+			if i+1 >= len(args) {
+				return parsed, errors.New("после --config нужен путь")
+			}
+			parsed.configPath = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--config="):
+			parsed.configPath = strings.TrimPrefix(a, "--config=")
+		case a == "--dry-run":
+			parsed.dryRun = true
+		case a == "--system":
+			parsed.system = true
+		case a == "--run-as":
+			if i+1 >= len(args) {
+				return parsed, errors.New("после --run-as нужен пользователь")
+			}
+			parsed.runAs = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--run-as="):
+			parsed.runAs = strings.TrimPrefix(a, "--run-as=")
+		case strings.HasPrefix(a, "-"):
+			return parsed, fmt.Errorf("неизвестный аргумент autostart %s: %s", parsed.action, a)
+		default:
+			if parsed.target != "" {
+				return parsed, fmt.Errorf("лишний аргумент autostart %s: %s", parsed.action, a)
+			}
+			parsed.target = a
+		}
+	}
+	if (parsed.action == "install" || parsed.action == "print") && parsed.target == "" {
+		return parsed, fmt.Errorf("для autostart %s нужно указать профиль или группу", parsed.action)
+	}
+	if parsed.action != "install" && parsed.action != "print" && parsed.target != "" {
+		return parsed, fmt.Errorf("autostart %s не принимает имя профиля или группы", parsed.action)
+	}
+	if parsed.dryRun && parsed.action != "install" && parsed.action != "print" {
+		return parsed, errors.New("--dry-run поддерживается только для autostart install и print")
+	}
+	return parsed, nil
+}
+
+func cmdAutostart(args []string) error {
+	parsed, err := parseAutostartArgs(args)
+	if err != nil {
+		return err
+	}
+	manager := autostart.New()
+	if err := manager.ConfigureMode(parsed.system, parsed.runAs); err != nil {
+		return err
+	}
+
+	switch parsed.action {
+	case "status":
+		status, err := manager.Status()
+		if err != nil {
+			return err
+		}
+		printAutostartStatus(status)
+		printManagedTunnelSummary()
+		return nil
+	case "start":
+		result, err := manager.Start()
+		if err != nil {
+			return err
+		}
+		fmt.Println(result.Message)
+		printAutostartStatus(result.Status)
+		return nil
+	case "stop":
+		result, err := manager.Stop()
+		if err != nil {
+			return err
+		}
+		fmt.Println(result.Message)
+		printAutostartStatus(result.Status)
+		return nil
+	case "remove":
+		result, err := manager.Remove()
+		if err != nil {
+			return err
+		}
+		fmt.Println(result.Message)
+		printAutostartStatus(result.Status)
+		return nil
+	}
+
+	spec, cfg, err := makeAutostartSpec(parsed)
+	if err != nil {
+		return err
+	}
+	if _, ok := cfg.ResolveTarget(parsed.target); !ok {
+		return fmt.Errorf("профиль или группа не найдены: %s", parsed.target)
+	}
+	plan, err := manager.Plan(spec)
+	if err != nil {
+		return err
+	}
+	printAutostartPlan(plan)
+	if parsed.action == "print" || parsed.dryRun {
+		fmt.Println()
+		fmt.Print(plan.Content)
+		if parsed.dryRun {
+			fmt.Println("Предварительный просмотр завершён. Система не изменена.")
+		}
+		return nil
+	}
+	result, err := manager.Install(spec)
+	if err != nil {
+		return err
+	}
+	fmt.Println(result.Message)
+	printAutostartStatus(result.Status)
+	return nil
+}
+
+func makeAutostartSpec(parsed autostartArgs) (autostart.Spec, config.Config, error) {
+	cfg, err := config.Load(parsed.configPath)
+	if err != nil {
+		return autostart.Spec{}, config.Config{}, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return autostart.Spec{}, config.Config{}, err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return autostart.Spec{}, config.Config{}, err
+	}
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		return autostart.Spec{}, config.Config{}, err
+	}
+	configPath, err := filepath.Abs(config.EffectivePath(parsed.configPath))
+	if err != nil {
+		return autostart.Spec{}, config.Config{}, err
+	}
+	return autostart.Spec{
+		Target:     parsed.target,
+		Executable: executable,
+		ConfigPath: configPath,
+		System:     parsed.system,
+		RunAs:      parsed.runAs,
+	}, cfg, nil
+}
+
+func printAutostartPlan(plan autostart.Plan) {
+	fmt.Println("Механизм:", plan.Mechanism)
+	fmt.Println("Объект:", plan.Object)
+	fmt.Println("Режим:", plan.Mode)
+	fmt.Println("Команда:", plan.Command)
+}
+
+func printAutostartStatus(status autostart.Status) {
+	fmt.Println("Механизм автозапуска:", status.Mechanism)
+	fmt.Println("Объект:", status.Object)
+	fmt.Println("Состояние:", status.State)
+	if status.Detail != "" {
+		fmt.Println("Подробности:", status.Detail)
+	}
+}
+
+func printManagedTunnelSummary() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	state, err := supervisor.Status(ctx)
+	if err != nil {
+		fmt.Println("Управляемый туннель: наличие запущенного туннеля не удалось определить")
+		return
+	}
+	fmt.Println("Управляемый туннель: запущен")
+	fmt.Println("Активный профиль:", emptyAs(state.ActiveProfile, "не определён"))
+	fmt.Println("SOCKS:", emptyAs(state.Listen, "не определён"))
+	fmt.Println("Важно: состояние процесса не доказывает работоспособность туннеля; используй tunnelctl status для health-check.")
+}
+
+func cmdDoctor(args []string) error {
+	configPath, err := parseOnlyConfig("doctor", args)
+	if err != nil {
+		return err
+	}
+	fmt.Println("Диагностика tunnelctl")
+	fmt.Println("Версия:", Version)
+	fmt.Println("Платформа:", runtime.GOOS, runtime.GOARCH)
+	fmt.Println("Конфиг:", config.EffectivePath(configPath))
+	fmt.Println("Лог:", paths.LogPath())
+	fmt.Println("State:", paths.StatePath())
+	fmt.Println("Управляющий канал:", paths.ControlPath())
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Println("Конфиг: ошибка чтения:", err)
+		return nil
+	}
+	if err := cfg.Validate(); err != nil {
+		fmt.Println("Конфиг: ошибка проверки:", err)
+		return nil
+	}
+	fmt.Printf("Профилей: %d, групп: %d\n", len(cfg.Profiles), len(cfg.Groups))
+	for _, p := range cfg.Profiles {
+		listen := p.EffectiveListen(cfg)
+		fmt.Printf("- %s (%s), SOCKS %s\n", p.Name, p.Alias, listen)
+		if p.Key != "" {
+			if _, err := os.Stat(expandHome(p.Key)); err != nil {
+				fmt.Println("  ключ: не найден")
+			} else {
+				fmt.Println("  ключ: найден")
+			}
+		}
+		checkPort(listen)
+	}
+	return nil
+}
+
+func parseOnlyConfig(command string, args []string) (string, error) {
+	configPath := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--config" || a == "-config":
+			if i+1 >= len(args) {
+				return "", errors.New("после --config нужен путь")
 			}
 			configPath = args[i+1]
 			i++
@@ -152,119 +577,11 @@ func cmdConnect(args []string) error {
 			configPath = strings.TrimPrefix(a, "--config=")
 		case strings.HasPrefix(a, "-config="):
 			configPath = strings.TrimPrefix(a, "-config=")
-		case a == "--watch" || a == "-watch":
-			watch = true
-		case a == "--no-watch" || a == "-no-watch":
-			watch = false
-		case a == "--watch=false" || a == "-watch=false":
-			watch = false
-		case a == "--watch=true" || a == "-watch=true":
-			watch = true
-		case strings.HasPrefix(a, "-"):
-			return fmt.Errorf("неизвестный аргумент connect: %s", a)
 		default:
-			if name != "" {
-				return fmt.Errorf("лишний аргумент connect: %s", a)
-			}
-			name = a
+			return "", fmt.Errorf("неизвестный аргумент %s: %s", command, a)
 		}
 	}
-	if name == "" {
-		return errors.New("нужно указать имя профиля, алиас или группу")
-	}
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return err
-	}
-	return connectByName(cfg, name, watch)
-}
-
-func connectByName(cfg config.Config, name string, watch bool) error {
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
-	ctx := signalContext()
-	if p, ok := cfg.ResolveProfile(name); ok {
-		return runSingleProfile(ctx, cfg, p, watch)
-	}
-	if g, ok := cfg.ResolveGroup(name); ok {
-		return runGroup(ctx, cfg, g, watch)
-	}
-	return fmt.Errorf("профиль или группа не найдены: %s", name)
-}
-
-func runSingleProfile(ctx context.Context, cfg config.Config, p config.Profile, watch bool) error {
-	fmt.Println("Запускаю одиночный профиль:", p.Name)
-	logx.Info("запуск одиночного профиля: %s", p.Name)
-	return sshproxy.Run(ctx, cfg, p, watch)
-}
-
-func runGroup(ctx context.Context, cfg config.Config, g config.Group, watch bool) error {
-	profiles, err := resolveGroupProfiles(cfg, g)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("Запускаю группу %s, стратегия: %s, профилей: %d\n", groupDisplayName(g), emptyAs(g.Strategy, "failover"), len(profiles))
-	logx.Info("запуск группы %s, профилей: %d", groupDisplayName(g), len(profiles))
-
-	minDelay, maxDelay := reconnectBounds(cfg)
-	cycleDelay := minDelay
-	cycle := 0
-	for {
-		cycle++
-		fmt.Printf("Круг failover #%d\n", cycle)
-		logx.Info("круг failover #%d для группы %s", cycle, groupDisplayName(g))
-
-		for i, p := range profiles {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-			}
-
-			fmt.Printf("Пробую профиль %d/%d: %s (%s@%s)\n", i+1, len(profiles), p.Name, p.User, p.Address())
-			logx.Info("failover: пробую профиль %d/%d: %s", i+1, len(profiles), p.Name)
-			started := time.Now()
-			err := sshproxy.RunOnce(ctx, cfg, p, watch)
-			runDuration := time.Since(started)
-
-			if ctx.Err() != nil {
-				return nil
-			}
-			if err == nil {
-				return nil
-			}
-
-			fmt.Printf("Профиль %s завершился с ошибкой: %v\n", p.Name, err)
-			logx.Warn("failover: профиль %s завершился с ошибкой: %v", p.Name, err)
-
-			if stableEnoughForDelayReset(cfg, runDuration) {
-				cycleDelay = minDelay
-			}
-			if !watch {
-				continue
-			}
-			if i+1 < len(profiles) {
-				fmt.Printf("Перехожу к следующему профилю через %s...\n", minDelay)
-				if !sleepContext(ctx, minDelay) {
-					return nil
-				}
-			}
-		}
-
-		if !watch {
-			return errors.New("ни один профиль группы не подключился")
-		}
-		fmt.Printf("Все профили группы завершились ошибкой. Новый круг через %s...\n", cycleDelay)
-		logx.Warn("failover: все профили группы %s завершились ошибкой, задержка %s", groupDisplayName(g), cycleDelay)
-		if !sleepContext(ctx, cycleDelay) {
-			return nil
-		}
-		cycleDelay *= 2
-		if cycleDelay > maxDelay {
-			cycleDelay = maxDelay
-		}
-	}
+	return configPath, nil
 }
 
 func resolveGroupProfiles(cfg config.Config, g config.Group) ([]config.Profile, error) {
@@ -302,107 +619,11 @@ func stableEnoughForDelayReset(cfg config.Config, d time.Duration) bool {
 	return d >= 2*interval
 }
 
-func sleepContext(ctx context.Context, d time.Duration) bool {
-	select {
-	case <-ctx.Done():
-		return false
-	case <-time.After(d):
-		return true
-	}
-}
-
 func groupDisplayName(g config.Group) string {
 	if g.Alias != "" {
 		return g.Alias
 	}
 	return g.Name
-}
-
-func emptyAs(value, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
-}
-
-func signalContext() context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-ch
-		fmt.Println()
-		fmt.Println("Получен сигнал остановки, завершаю работу...")
-		cancel()
-	}()
-	return ctx
-}
-
-func cmdDoctor(args []string) error {
-	configPath := ""
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "--config" || a == "-config":
-			if i+1 >= len(args) {
-				return errors.New("после --config нужен путь")
-			}
-			configPath = args[i+1]
-			i++
-		case strings.HasPrefix(a, "--config="):
-			configPath = strings.TrimPrefix(a, "--config=")
-		case strings.HasPrefix(a, "-config="):
-			configPath = strings.TrimPrefix(a, "-config=")
-		default:
-			return fmt.Errorf("неизвестный аргумент doctor: %s", a)
-		}
-	}
-	fmt.Println("Диагностика tunnelctl")
-	fmt.Println("Версия:", Version)
-	fmt.Println("Платформа:", runtime.GOOS, runtime.GOARCH)
-	fmt.Println("Конфиг:", choose(configPath, paths.ConfigPath()))
-	fmt.Println("Лог:", paths.LogPath())
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		fmt.Println("Конфиг: ошибка чтения:", err)
-		return nil
-	}
-	fmt.Printf("Профилей: %d, групп: %d\n", len(cfg.Profiles), len(cfg.Groups))
-	for _, p := range cfg.Profiles {
-		listen := p.EffectiveListen(cfg)
-		fmt.Printf("- %s (%s): %s@%s, SOCKS %s\n", p.Name, p.Alias, p.User, p.Address(), listen)
-		if p.Key != "" {
-			if _, err := os.Stat(expandHome(p.Key)); err != nil {
-				fmt.Println("  ключ: не найден:", p.Key)
-			} else {
-				fmt.Println("  ключ: найден")
-			}
-		}
-		checkPort(listen)
-	}
-	fmt.Println("Команда установки Go в Termux при необходимости:")
-	fmt.Println("  pkg update && pkg install -y golang git curl")
-	fmt.Println("Команда установки Go в Ubuntu/Debian при доступном sudo:")
-	fmt.Println("  sudo apt update && sudo apt install -y golang-go git curl")
-	fmt.Println("Команда установки Go в Windows через winget:")
-	fmt.Println("  winget install --id GoLang.Go -e")
-	return nil
-}
-
-func cmdStatus(args []string) error {
-	cfg, err := config.Load("")
-	if err != nil {
-		return err
-	}
-	addr := cfg.Defaults.Listen
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-	if err != nil {
-		fmt.Println("Локальный SOCKS не отвечает на", addr)
-		return nil
-	}
-	_ = conn.Close()
-	fmt.Println("Локальный порт открыт:", addr)
-	return nil
 }
 
 func checkPort(addr string) {
@@ -415,17 +636,17 @@ func checkPort(addr string) {
 	fmt.Println("  порт: занят или недоступен:", err)
 }
 
-func choose(a, b string) string {
-	if a != "" {
-		return a
+func emptyAs(value, fallback string) string {
+	if value == "" {
+		return fallback
 	}
-	return b
+	return value
 }
 
 func expandHome(p string) string {
 	if strings.HasPrefix(p, "~/") {
 		if h, err := os.UserHomeDir(); err == nil {
-			return h + string(os.PathSeparator) + p[2:]
+			return filepath.Join(h, p[2:])
 		}
 	}
 	return p
