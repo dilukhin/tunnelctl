@@ -36,8 +36,21 @@ func StateDir() string {
 	return filepath.Join(homeDir(), ".local", "state", AppName)
 }
 
-func ConfigPath() string { return filepath.Join(ConfigDir(), "tunnelctl.json") }
-func LogPath() string    { return filepath.Join(StateDir(), "tunnelctl.log") }
+// RuntimeDir возвращает каталог управляющего канала текущего пользователя.
+func RuntimeDir() string {
+	if runtime.GOOS == "windows" {
+		return StateDir()
+	}
+	if v := os.Getenv("XDG_RUNTIME_DIR"); v != "" {
+		return filepath.Join(v, AppName)
+	}
+	return StateDir()
+}
+
+func ConfigPath() string  { return filepath.Join(ConfigDir(), "tunnelctl.json") }
+func LogPath() string     { return filepath.Join(StateDir(), "tunnelctl.log") }
+func StatePath() string   { return filepath.Join(StateDir(), "tunnelctl.state.json") }
+func ControlPath() string { return filepath.Join(RuntimeDir(), "control.sock") }
 
 func homeDir() string {
 	if h, err := os.UserHomeDir(); err == nil && h != "" {

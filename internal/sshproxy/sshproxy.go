@@ -15,11 +15,32 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"tunnelctl/internal/config"
 	"tunnelctl/internal/logx"
 )
+
+type EventType string
+
+const (
+	EventStarting      EventType = "starting"
+	EventListening     EventType = "listening"
+	EventHealthSuccess EventType = "health_success"
+	EventHealthFailure EventType = "health_failure"
+	EventStopped       EventType = "stopped"
+)
+
+type Event struct {
+	Type    EventType
+	Profile string
+	Listen  string
+	Time    time.Time
+	Err     error
+}
+
+type Observer func(Event)
 
 // Run запускает одиночный профиль. В режиме watch профиль переподключается к тому же VPS.
 func Run(ctx context.Context, cfg config.Config, p config.Profile, watch bool) error {
@@ -56,15 +77,19 @@ func Run(ctx context.Context, cfg config.Config, p config.Profile, watch bool) e
 }
 
 // RunOnce запускает профиль один раз и возвращает управление при завершении ssh или падении health-check.
-// Для failover-групп вызывающая сторона использует эту функцию, чтобы после ошибки перейти к следующему VPS.
 func RunOnce(ctx context.Context, cfg config.Config, p config.Profile, watch bool) error {
+	return RunOnceObserved(ctx, cfg, p, watch, nil)
+}
+
+// RunOnceObserved запускает профиль один раз и сообщает безопасные события жизненного цикла.
+func RunOnceObserved(ctx context.Context, cfg config.Config, p config.Profile, watch bool, observe Observer) error {
 	if err := validateListen(p.EffectiveListen(cfg), cfg.Defaults.AllowListenAllHosts); err != nil {
 		return err
 	}
 	if _, err := exec.LookPath("ssh"); err != nil {
 		return fmt.Errorf("не найден ssh. Установи OpenSSH. Команды: Termux: pkg install openssh; Ubuntu/Debian: sudo apt install openssh-client; Windows: winget install --id Microsoft.OpenSSH.Beta -e")
 	}
-	return runOnce(ctx, cfg, p, watch)
+	return runOnce(ctx, cfg, p, watch, observe)
 }
 
 func reconnectBounds(cfg config.Config) (time.Duration, time.Duration) {
@@ -79,39 +104,67 @@ func reconnectBounds(cfg config.Config) (time.Duration, time.Duration) {
 	return minDelay, maxDelay
 }
 
-func runOnce(ctx context.Context, cfg config.Config, p config.Profile, watch bool) error {
+func runOnce(ctx context.Context, cfg config.Config, p config.Profile, watch bool, observe Observer) error {
 	listen := p.EffectiveListen(cfg)
 	args := sshArgs(cfg, p)
+	emit(observe, Event{Type: EventStarting, Profile: p.Name, Listen: listen, Time: time.Now()})
 	fmt.Println("Запускаю SSH:")
 	fmt.Println("  ssh", strings.Join(maskArgs(args), " "))
 	logx.Info("запуск ssh: ssh %s", strings.Join(maskArgs(args), " "))
 
-	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd := exec.Command("ssh", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	defer killProcess(cmd)
 
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
+	stopWatcher := make(chan struct{})
+	var stopOnce sync.Once
+	stopProcess := func() {
+		stopOnce.Do(func() {
+			close(stopWatcher)
+			killProcess(cmd)
+		})
+	}
+	defer stopProcess()
+	go func() {
+		select {
+		case <-ctx.Done():
+			stopProcess()
+		case <-stopWatcher:
+		}
+	}()
 
-	// Даём ssh открыть локальный порт. Если нужен пароль, пользователь вводит его прямо в ssh.
 	if err := waitPort(ctx, listen, 20*time.Second); err != nil {
-		killProcess(cmd)
+		stopProcess()
 		return err
 	}
-	fmt.Printf("SOCKS5 слушает %s, SSH %s@%s\n", listen, p.User, p.Address())
-	logx.Info("SOCKS5 слушает %s, SSH %s@%s", listen, p.User, p.Address())
+	fmt.Printf("SOCKS5 слушает %s, профиль %s\n", listen, p.Name)
+	logx.Info("SOCKS5 слушает %s, профиль %s", listen, p.Name)
+	emit(observe, Event{Type: EventListening, Profile: p.Name, Listen: listen, Time: time.Now()})
+
+	if watch {
+		if err := CheckHTTPViaSocks(listen, p.EffectiveHealthURL(cfg), healthTimeout(cfg)); err != nil {
+			emit(observe, Event{Type: EventHealthFailure, Profile: p.Name, Listen: listen, Time: time.Now(), Err: err})
+			stopProcess()
+			return fmt.Errorf("начальная проверка прокси не прошла: %w", err)
+		}
+		fmt.Println("Проверка прокси успешна.")
+		logx.Info("начальная проверка прокси успешна")
+		emit(observe, Event{Type: EventHealthSuccess, Profile: p.Name, Listen: listen, Time: time.Now()})
+	}
 
 	if !watch {
 		select {
 		case <-ctx.Done():
-			killProcess(cmd)
+			stopProcess()
 			return nil
 		case err := <-exited:
+			emit(observe, Event{Type: EventStopped, Profile: p.Name, Listen: listen, Time: time.Now(), Err: err})
 			return err
 		}
 	}
@@ -126,18 +179,20 @@ func runOnce(ctx context.Context, cfg config.Config, p config.Profile, watch boo
 	for {
 		select {
 		case <-ctx.Done():
-			killProcess(cmd)
+			stopProcess()
 			return nil
 		case err := <-exited:
+			emit(observe, Event{Type: EventStopped, Profile: p.Name, Listen: listen, Time: time.Now(), Err: err})
 			return err
 		case <-ticker.C:
-			if err := CheckHTTPViaSocks(listen, p.EffectiveHealthURL(cfg), time.Duration(cfg.Defaults.HealthTimeoutSec)*time.Second); err != nil {
+			if err := CheckHTTPViaSocks(listen, p.EffectiveHealthURL(cfg), healthTimeout(cfg)); err != nil {
 				fails++
 				fmt.Println("Проверка прокси не прошла:", err)
 				logx.Warn("проверка прокси не прошла: %v", err)
+				emit(observe, Event{Type: EventHealthFailure, Profile: p.Name, Listen: listen, Time: time.Now(), Err: err})
 				if fails >= 2 {
-					fmt.Println("Убиваю зависший SSH-процесс и возвращаю ошибку супервизору.")
-					killProcess(cmd)
+					fmt.Println("Останавливаю зависший SSH-процесс и возвращаю ошибку супервизору.")
+					stopProcess()
 					return errors.New("прокси не работает")
 				}
 			} else {
@@ -146,8 +201,19 @@ func runOnce(ctx context.Context, cfg config.Config, p config.Profile, watch boo
 				}
 				fails = 0
 				logx.Info("проверка прокси успешна")
+				emit(observe, Event{Type: EventHealthSuccess, Profile: p.Name, Listen: listen, Time: time.Now()})
 			}
 		}
+	}
+}
+
+func healthTimeout(cfg config.Config) time.Duration {
+	return time.Duration(cfg.Defaults.HealthTimeoutSec) * time.Second
+}
+
+func emit(observe Observer, event Event) {
+	if observe != nil {
+		observe(event)
 	}
 }
 
@@ -174,17 +240,16 @@ func maskArgs(args []string) []string {
 	out := append([]string(nil), args...)
 	for i := 0; i < len(out)-1; i++ {
 		if out[i] == "-i" {
-			out[i+1] = shortPath(out[i+1])
+			out[i+1] = "<путь-к-ключу-скрыт>"
+		}
+	}
+	if len(out) > 0 {
+		last := out[len(out)-1]
+		if at := strings.LastIndex(last, "@"); at >= 0 {
+			out[len(out)-1] = "<пользователь>@" + last[at+1:]
 		}
 	}
 	return out
-}
-
-func shortPath(p string) string {
-	if h, err := os.UserHomeDir(); err == nil && strings.HasPrefix(p, h) {
-		return "~" + strings.TrimPrefix(p, h)
-	}
-	return p
 }
 
 func expandPath(p string) string {
@@ -225,6 +290,24 @@ func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
 		time.Sleep(300 * time.Millisecond)
 	}
 	return fmt.Errorf("локальный порт %s не открылся за %s", addr, timeout)
+}
+
+// WaitPortFree ожидает освобождения локального SOCKS-порта.
+func WaitPortFree(ctx context.Context, addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			_ = ln.Close()
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("локальный порт %s не освободился за %s; возможно, им владеет другой процесс", addr, timeout)
 }
 
 func killProcess(cmd *exec.Cmd) {

@@ -70,10 +70,15 @@ func DefaultConfig() Config {
 	}
 }
 
-func Load(path string) (Config, error) {
+func EffectivePath(path string) string {
 	if path == "" {
-		path = paths.ConfigPath()
+		return paths.ConfigPath()
 	}
+	return path
+}
+
+func Load(path string) (Config, error) {
+	path = EffectivePath(path)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, err
@@ -87,9 +92,7 @@ func Load(path string) (Config, error) {
 }
 
 func Save(path string, cfg Config) error {
-	if path == "" {
-		path = paths.ConfigPath()
-	}
+	path = EffectivePath(path)
 	cfg.Normalize()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -103,17 +106,12 @@ func Save(path string, cfg Config) error {
 }
 
 func Exists(path string) bool {
-	if path == "" {
-		path = paths.ConfigPath()
-	}
-	_, err := os.Stat(path)
+	_, err := os.Stat(EffectivePath(path))
 	return err == nil
 }
 
 func Ensure(path string) (Config, bool, error) {
-	if path == "" {
-		path = paths.ConfigPath()
-	}
+	path = EffectivePath(path)
 	if Exists(path) {
 		cfg, err := Load(path)
 		return cfg, false, err
@@ -179,6 +177,16 @@ func (c Config) ResolveGroup(nameOrAlias string) (Group, bool) {
 	return Group{}, false
 }
 
+func (c Config) ResolveTarget(nameOrAlias string) (string, bool) {
+	if p, ok := c.ResolveProfile(nameOrAlias); ok {
+		return p.Name, true
+	}
+	if g, ok := c.ResolveGroup(nameOrAlias); ok {
+		return g.Name, true
+	}
+	return "", false
+}
+
 func (c Config) ProfileByName(name string) (Profile, bool) {
 	for _, p := range c.Profiles {
 		if p.Name == name {
@@ -190,6 +198,7 @@ func (c Config) ProfileByName(name string) (Profile, bool) {
 
 func (c Config) Validate() error {
 	seen := map[string]bool{}
+	aliases := map[string]bool{}
 	for _, p := range c.Profiles {
 		if p.Name == "" {
 			return errors.New("в конфиге есть профиль без name")
@@ -200,6 +209,33 @@ func (c Config) Validate() error {
 		seen[p.Name] = true
 		if p.User == "" || p.Host == "" {
 			return fmt.Errorf("профиль %s: user/host обязательны", p.Name)
+		}
+		if p.Alias != "" && p.Alias != p.Name {
+			if aliases[p.Alias] || seen[p.Alias] {
+				return fmt.Errorf("дубликат имени или алиаса: %s", p.Alias)
+			}
+			aliases[p.Alias] = true
+		}
+	}
+	groupNames := map[string]bool{}
+	for _, g := range c.Groups {
+		if g.Name == "" {
+			return errors.New("в конфиге есть группа без name")
+		}
+		if seen[g.Name] || aliases[g.Name] || groupNames[g.Name] {
+			return fmt.Errorf("дубликат имени профиля или группы: %s", g.Name)
+		}
+		groupNames[g.Name] = true
+		if g.Alias != "" && g.Alias != g.Name {
+			if seen[g.Alias] || aliases[g.Alias] || groupNames[g.Alias] {
+				return fmt.Errorf("дубликат имени или алиаса: %s", g.Alias)
+			}
+			aliases[g.Alias] = true
+		}
+		for _, pn := range g.Profiles {
+			if _, ok := c.ProfileByName(pn); !ok {
+				return fmt.Errorf("в группе %s указан неизвестный профиль: %s", g.Name, pn)
+			}
 		}
 	}
 	return nil

@@ -23,5 +23,14 @@ jobs:
       - name: Запустить тесты
         run: go test ./...
 
+      - name: Запустить go vet
+        run: go vet ./...
+
       - name: Собрать Linux amd64
-        run: go build -o dist/tunnelctl-linux-amd64 ./cmd/tunnelctl
+        run: GOOS=linux GOARCH=amd64 go build -o dist/tunnelctl-linux-amd64 ./cmd/tunnelctl
+
+      - name: Собрать Windows amd64
+        run: GOOS=windows GOARCH=amd64 go build -o dist/tunnelctl-windows-amd64.exe ./cmd/tunnelctl
+
+      - name: Собрать Android arm64
+        run: GOOS=android GOARCH=arm64 go build -o dist/tunnelctl-android-arm64 ./cmd/tunnelctl
