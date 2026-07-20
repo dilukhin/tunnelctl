@@ -10,10 +10,10 @@ import (
 )
 
 var (
-	kernel32Output            = syscall.NewLazyDLL("kernel32.dll")
-	procGetConsoleOutputCP    = kernel32Output.NewProc("GetConsoleOutputCP")
-	procGetOEMCP              = kernel32Output.NewProc("GetOEMCP")
-	procMultiByteToWideChar   = kernel32Output.NewProc("MultiByteToWideChar")
+	kernel32Output          = syscall.NewLazyDLL("kernel32.dll")
+	procGetConsoleOutputCP  = kernel32Output.NewProc("GetConsoleOutputCP")
+	procGetOEMCP            = kernel32Output.NewProc("GetOEMCP")
+	procMultiByteToWideChar = kernel32Output.NewProc("MultiByteToWideChar")
 )
 
 func decodeCommandOutput(raw []byte) string {
