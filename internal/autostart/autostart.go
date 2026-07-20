@@ -78,7 +78,7 @@ type execRunner struct{}
 
 func (execRunner) Run(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	return decodeCommandOutput(out), err
 }
 
 type Backend interface {
