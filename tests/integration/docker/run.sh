@@ -7,7 +7,6 @@ COMPOSE_FILE="$SCRIPT_DIR/compose.yml"
 TEST_TMP="$(mktemp -d)"
 export TUNNELCTL_TEST_TMP="$TEST_TMP"
 export COMPOSE_PROJECT_NAME="tunnelctl-integration-$$"
-export HOME="$TEST_TMP/home"
 export XDG_CONFIG_HOME="$TEST_TMP/config"
 export XDG_STATE_HOME="$TEST_TMP/state"
 export XDG_RUNTIME_DIR="$TEST_TMP/runtime"
@@ -16,6 +15,16 @@ BIN="$TEST_TMP/tunnelctl"
 CONFIG="$TEST_TMP/tunnelctl.json"
 TUNNEL_LOG="$TEST_TMP/tunnelctl.stdout.log"
 TUNNEL_PID=""
+SSH_HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+SSH_HOME="${SSH_HOME:-$HOME}"
+SSH_DIR="$SSH_HOME/.ssh"
+KNOWN_HOSTS="$SSH_DIR/known_hosts"
+KNOWN_HOSTS_BACKUP="$TEST_TMP/known_hosts.backup"
+KNOWN_HOSTS_EXISTED=false
+if [[ -e "$KNOWN_HOSTS" ]]; then
+    cp -p "$KNOWN_HOSTS" "$KNOWN_HOSTS_BACKUP"
+    KNOWN_HOSTS_EXISTED=true
+fi
 
 compose() {
     docker compose -f "$COMPOSE_FILE" "$@"
@@ -39,6 +48,14 @@ cleanup() {
     fi
 
     compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+
+    if [[ "$KNOWN_HOSTS_EXISTED" == true ]]; then
+        cp -p "$KNOWN_HOSTS_BACKUP" "$KNOWN_HOSTS" >/dev/null 2>&1 || true
+    else
+        rm -f "$KNOWN_HOSTS" >/dev/null 2>&1 || true
+        rmdir "$SSH_DIR" >/dev/null 2>&1 || true
+    fi
+
     rm -rf "$TEST_TMP"
     return "$status"
 }
@@ -108,8 +125,12 @@ done
 docker compose version >/dev/null
 
 cd "$REPO_ROOT"
-mkdir -p "$HOME/.ssh" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR"
-chmod 0700 "$HOME/.ssh" "$XDG_RUNTIME_DIR"
+mkdir -p "$SSH_DIR" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR"
+chmod 0700 "$SSH_DIR" "$XDG_RUNTIME_DIR"
+if [[ "$KNOWN_HOSTS_EXISTED" == false ]]; then
+    : > "$KNOWN_HOSTS"
+fi
+chmod 0600 "$KNOWN_HOSTS"
 
 ssh-keygen -q -t ed25519 -N '' -f "$TEST_TMP/id_ed25519"
 go build -o "$BIN" ./cmd/tunnelctl
@@ -118,8 +139,8 @@ compose up -d --build
 wait_for_ssh 22221 "$TEST_TMP/known_hosts.one"
 wait_for_ssh 22222 "$TEST_TMP/known_hosts.two"
 wait_for_target
-cat "$TEST_TMP/known_hosts.one" "$TEST_TMP/known_hosts.two" > "$HOME/.ssh/known_hosts"
-chmod 0600 "$HOME/.ssh/known_hosts"
+cat "$TEST_TMP/known_hosts.one" "$TEST_TMP/known_hosts.two" >> "$KNOWN_HOSTS"
+chmod 0600 "$KNOWN_HOSTS"
 
 cat > "$CONFIG" <<EOF_CONFIG
 {
