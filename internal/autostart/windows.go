@@ -2,10 +2,12 @@ package autostart
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode/utf16"
 
 	"tunnelctl/internal/paths"
 )
@@ -69,7 +71,7 @@ func (b *windowsBackend) Install(spec Spec) (Result, error) {
 		return Result{}, err
 	}
 	temp := filepath.Join(paths.StateDir(), "tunnelctl-task.xml")
-	if err := b.fs.WriteFile(temp, []byte(plan.Content), 0o600); err != nil {
+	if err := b.fs.WriteFile(temp, encodeUTF16LEWithBOM(plan.Content), 0o600); err != nil {
 		return Result{}, err
 	}
 	defer b.fs.Remove(temp)
@@ -81,7 +83,7 @@ func (b *windowsBackend) Install(spec Spec) (Result, error) {
 			_, _ = b.runner.Run("schtasks.exe", "/Delete", "/TN", windowsTaskName, "/F")
 		} else {
 			restore := filepath.Join(paths.StateDir(), "tunnelctl-task-restore.xml")
-			if writeErr := b.fs.WriteFile(restore, []byte(old), 0o600); writeErr == nil {
+			if writeErr := b.fs.WriteFile(restore, encodeUTF16LEWithBOM(old), 0o600); writeErr == nil {
 				_, _ = b.runner.Run("schtasks.exe", "/Create", "/TN", windowsTaskName, "/XML", restore, "/F")
 				_ = b.fs.Remove(restore)
 			}
@@ -196,7 +198,7 @@ func renderWindowsTask(spec Spec) string {
 		"--config",
 		windowsQuoteArg(spec.ConfigPath),
 	}, " ")
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>%s</Description>
@@ -214,7 +216,7 @@ func renderWindowsTask(spec Spec) string {
     <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <RestartOnFailure><Interval>PT15S</Interval><Count>999</Count></RestartOnFailure>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>255</Count></RestartOnFailure>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -225,6 +227,16 @@ func renderWindowsTask(spec Spec) string {
   </Actions>
 </Task>
 `, xmlEscape(OwnershipMarker), xmlEscape(spec.Executable), xmlEscape(args), xmlEscape(filepath.Dir(spec.Executable)))
+}
+
+func encodeUTF16LEWithBOM(value string) []byte {
+	units := utf16.Encode([]rune(value))
+	result := make([]byte, 2+len(units)*2)
+	result[0], result[1] = 0xff, 0xfe
+	for i, unit := range units {
+		binary.LittleEndian.PutUint16(result[2+i*2:], unit)
+	}
+	return result
 }
 
 func xmlEscape(value string) string {
