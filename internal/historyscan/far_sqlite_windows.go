@@ -18,15 +18,15 @@ const (
 
 var (
 	winSQLite             = syscall.NewLazyDLL("winsqlite3.dll")
-	procSQLiteOpen        = winSQLite.NewProc("winsqlite3_open")
-	procSQLiteClose       = winSQLite.NewProc("winsqlite3_close")
-	procSQLitePrepareV2   = winSQLite.NewProc("winsqlite3_prepare_v2")
-	procSQLiteStep        = winSQLite.NewProc("winsqlite3_step")
-	procSQLiteFinalize    = winSQLite.NewProc("winsqlite3_finalize")
-	procSQLiteColumnText  = winSQLite.NewProc("winsqlite3_column_text")
-	procSQLiteColumnBytes = winSQLite.NewProc("winsqlite3_column_bytes")
-	procSQLiteColumnInt64 = winSQLite.NewProc("winsqlite3_column_int64")
-	procSQLiteErrmsg      = winSQLite.NewProc("winsqlite3_errmsg")
+	procSQLiteOpen        = winSQLite.NewProc("sqlite3_open")
+	procSQLiteClose       = winSQLite.NewProc("sqlite3_close")
+	procSQLitePrepareV2   = winSQLite.NewProc("sqlite3_prepare_v2")
+	procSQLiteStep        = winSQLite.NewProc("sqlite3_step")
+	procSQLiteFinalize    = winSQLite.NewProc("sqlite3_finalize")
+	procSQLiteColumnText  = winSQLite.NewProc("sqlite3_column_text")
+	procSQLiteColumnBytes = winSQLite.NewProc("sqlite3_column_bytes")
+	procSQLiteColumnInt64 = winSQLite.NewProc("sqlite3_column_int64")
+	procSQLiteErrmsg      = winSQLite.NewProc("sqlite3_errmsg")
 )
 
 type farHistoryRecord struct {
