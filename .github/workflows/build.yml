@@ -18,7 +18,13 @@ jobs:
           go-version: '1.22'
 
       - name: Проверить gofmt
-        run: test -z "$(gofmt -l .)"
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            echo "Следующие файлы требуют gofmt:"
+            echo "$files"
+            exit 1
+          fi
 
       - name: Запустить тесты
         run: go test ./...
