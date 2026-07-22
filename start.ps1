@@ -18,6 +18,13 @@ function Has-Command($Name) {
     return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Invoke-NativeChecked($Description, [scriptblock]$Command) {
+    & $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Description завершилась с кодом $LASTEXITCODE"
+    }
+}
+
 function Install-Go-IfNeeded {
     if (Has-Command "go") {
         Write-Host "Go найден: $(go version)"
@@ -29,7 +36,7 @@ function Install-Go-IfNeeded {
         Write-Host "Команда установки через winget:"
         Write-Host "  winget install --id GoLang.Go -e"
         if (Ask-YesNo "Выполнить установку Go через winget?" $true) {
-            winget install --id GoLang.Go -e
+            Invoke-NativeChecked "Установка Go через winget" { winget install --id GoLang.Go -e }
             $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
             return
         }
@@ -39,7 +46,7 @@ function Install-Go-IfNeeded {
         Write-Host "Команда установки через Chocolatey:"
         Write-Host "  choco install golang -y"
         if (Ask-YesNo "Выполнить установку Go через Chocolatey?" $true) {
-            choco install golang -y
+            Invoke-NativeChecked "Установка Go через Chocolatey" { choco install golang -y }
             $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
             return
         }
@@ -60,8 +67,8 @@ function Build-App {
     Write-Host "  go build -o `"$Bin`" ./cmd/tunnelctl"
     Push-Location $RootDir
     try {
-        go mod download
-        go build -o $Bin ./cmd/tunnelctl
+        Invoke-NativeChecked "Загрузка модулей Go" { go mod download }
+        Invoke-NativeChecked "Сборка tunnelctl" { go build -o $Bin ./cmd/tunnelctl }
     } finally {
         Pop-Location
     }
@@ -74,3 +81,6 @@ Install-Go-IfNeeded
 Build-App
 Write-Host "Запускаю мастер настройки..."
 & $Bin bootstrap
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
