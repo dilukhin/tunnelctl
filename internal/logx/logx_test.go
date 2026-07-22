@@ -96,3 +96,43 @@ func TestRotateDoesNotTriggerAtExactLimit(t *testing.T) {
 		t.Fatalf("лог на границе не должен ротироваться: %v", err)
 	}
 }
+
+func TestRotateActiveLogWhileProcessIsRunning(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tunnelctl.log")
+
+	mu.Lock()
+	oldFile, oldLogger := file, logger
+	file, logger = nil, nil
+	if err := openLogLocked(path); err != nil {
+		mu.Unlock()
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("12345678901"); err != nil {
+		mu.Unlock()
+		t.Fatal(err)
+	}
+	if err := rotateActiveLogIfNeededLocked(10, time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)); err != nil {
+		mu.Unlock()
+		t.Fatal(err)
+	}
+	active := file
+	file, logger = oldFile, oldLogger
+	mu.Unlock()
+	defer active.Close()
+
+	archives, err := filepath.Glob(path + ".*.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archives) != 1 {
+		t.Fatalf("ожидался один архив, получено %v", archives)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("новый активный лог должен быть пустым, размер=%d", info.Size())
+	}
+}
