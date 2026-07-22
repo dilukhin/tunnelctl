@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"tunnelctl/internal/commanddiag"
 )
 
 const OwnershipMarker = "Создано tunnelctl. Ручные изменения могут быть заменены."
@@ -77,8 +79,25 @@ type CommandRunner interface {
 type execRunner struct{}
 
 func (execRunner) Run(name string, args ...string) (string, error) {
-	out, err := exec.Command(name, args...).CombinedOutput()
-	return decodeCommandOutput(out), err
+	meta := commanddiag.Metadata{Context: "autostart external utility"}
+	commanddiag.LogStart(meta, name, args)
+	cmd := exec.Command(name, args...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		commanddiag.LogFailure(meta, name, args, err, stderr.String())
+	}
+	combined := append([]byte(nil), stdout.Bytes()...)
+	if stderr.Len() > 0 {
+		if len(combined) > 0 && combined[len(combined)-1] != '\n' {
+			combined = append(combined, '\n')
+		}
+		combined = append(combined, stderr.Bytes()...)
+	}
+	return decodeCommandOutput(combined), err
 }
 
 type Backend interface {
