@@ -1,4 +1,4 @@
-# Стартовый скрипт tunnelctl для Windows.
+﻿# Стартовый скрипт tunnelctl для Windows.
 # Проверяет Go, при необходимости предлагает установку, собирает tunnelctl и запускает мастер настройки.
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
