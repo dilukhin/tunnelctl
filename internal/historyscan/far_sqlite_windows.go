@@ -3,7 +3,6 @@
 package historyscan
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -103,7 +102,8 @@ func copySQLiteSnapshot(path string) (string, func(), error) {
 		cleanup()
 		return "", func() {}, err
 	}
-	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+	// SHM не копируется: SQLite безопасно пересоздаёт его рядом со снимком WAL.
+	for _, suffix := range []string{"-wal", "-journal"} {
 		source := path + suffix
 		if _, err := os.Stat(source); err != nil {
 			continue
@@ -157,8 +157,4 @@ func sqliteError(database uintptr) string {
 		}
 	}
 	return string(bytes)
-}
-
-func isFarSQLiteUnavailable(err error) bool {
-	return errors.Is(err, syscall.ERROR_MOD_NOT_FOUND) || errors.Is(err, syscall.ERROR_PROC_NOT_FOUND)
 }
