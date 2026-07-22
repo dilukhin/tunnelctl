@@ -16,8 +16,10 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"tunnelctl/internal/commanddiag"
 	"tunnelctl/internal/config"
 	"tunnelctl/internal/logx"
 )
@@ -41,6 +43,8 @@ type Event struct {
 }
 
 type Observer func(Event)
+
+var attemptSequence uint64
 
 // Run запускает одиночный профиль. В режиме watch профиль переподключается к тому же VPS.
 func Run(ctx context.Context, cfg config.Config, p config.Profile, watch bool) error {
@@ -107,17 +111,20 @@ func reconnectBounds(cfg config.Config) (time.Duration, time.Duration) {
 func runOnce(ctx context.Context, cfg config.Config, p config.Profile, watch bool, observe Observer) error {
 	listen := p.EffectiveListen(cfg)
 	args := sshArgs(cfg, p)
+	attempt := atomic.AddUint64(&attemptSequence, 1)
 	emit(observe, Event{Type: EventStarting, Profile: p.Name, Listen: listen, Time: time.Now()})
 	fmt.Println("Запускаю SSH:")
-	fmt.Println("  ssh", strings.Join(maskArgs(args), " "))
-	logx.Info("запуск ssh: ssh %s", strings.Join(maskArgs(args), " "))
+	fmt.Println(" ", commanddiag.SafeCommand("ssh", args, sshSecrets(p)...))
+	logSSHStart("запуск", attempt, p, args)
 
+	stderr := newBoundedBuffer(maxCapturedStderr)
 	cmd := exec.Command("ssh", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = io.MultiWriter(os.Stderr, stderr)
 	if err := cmd.Start(); err != nil {
-		return err
+		logSSHFailure("запуск процесса", attempt, p, args, err, stderr.String())
+		return fmt.Errorf("не удалось запустить ssh: %w", err)
 	}
 
 	exited := make(chan error, 1)
@@ -139,9 +146,24 @@ func runOnce(ctx context.Context, cfg config.Config, p config.Profile, watch boo
 		}
 	}()
 
-	if err := waitPort(ctx, listen, 20*time.Second); err != nil {
+	earlyExit, waitErr := waitPortOrExit(ctx, listen, 20*time.Second, exited)
+	if waitErr != nil {
 		stopProcess()
-		return err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		exitErr := earlyExit
+		if exitErr == nil {
+			if value, ok := waitExit(exited, 2*time.Second); ok {
+				exitErr = value
+			}
+		}
+		diagnosticErr := exitErr
+		if diagnosticErr == nil {
+			diagnosticErr = waitErr
+		}
+		logSSHFailure("ожидание SOCKS-порта: "+waitErr.Error(), attempt, p, args, diagnosticErr, stderr.String())
+		return waitErr
 	}
 	fmt.Printf("SOCKS5 слушает %s, профиль %s\n", listen, p.Name)
 	logx.Info("SOCKS5 слушает %s, профиль %s", listen, p.Name)
@@ -151,6 +173,12 @@ func runOnce(ctx context.Context, cfg config.Config, p config.Profile, watch boo
 		if err := CheckHTTPViaSocks(listen, p.EffectiveHealthURL(cfg), healthTimeout(cfg)); err != nil {
 			emit(observe, Event{Type: EventHealthFailure, Profile: p.Name, Listen: listen, Time: time.Now(), Err: err})
 			stopProcess()
+			exitErr, _ := waitExit(exited, 2*time.Second)
+			diagnosticErr := exitErr
+			if diagnosticErr == nil {
+				diagnosticErr = err
+			}
+			logSSHFailure("начальная проверка прокси: "+err.Error(), attempt, p, args, diagnosticErr, stderr.String())
 			return fmt.Errorf("начальная проверка прокси не прошла: %w", err)
 		}
 		fmt.Println("Проверка прокси успешна.")
@@ -165,6 +193,9 @@ func runOnce(ctx context.Context, cfg config.Config, p config.Profile, watch boo
 			return nil
 		case err := <-exited:
 			emit(observe, Event{Type: EventStopped, Profile: p.Name, Listen: listen, Time: time.Now(), Err: err})
+			if err != nil {
+				logSSHFailure("процесс завершился", attempt, p, args, err, stderr.String())
+			}
 			return err
 		}
 	}
@@ -183,6 +214,7 @@ func runOnce(ctx context.Context, cfg config.Config, p config.Profile, watch boo
 			return nil
 		case err := <-exited:
 			emit(observe, Event{Type: EventStopped, Profile: p.Name, Listen: listen, Time: time.Now(), Err: err})
+			logSSHFailure("неожиданное завершение процесса", attempt, p, args, err, stderr.String())
 			return err
 		case <-ticker.C:
 			if err := CheckHTTPViaSocks(listen, p.EffectiveHealthURL(cfg), healthTimeout(cfg)); err != nil {
@@ -193,6 +225,12 @@ func runOnce(ctx context.Context, cfg config.Config, p config.Profile, watch boo
 				if fails >= 2 {
 					fmt.Println("Останавливаю зависший SSH-процесс и возвращаю ошибку супервизору.")
 					stopProcess()
+					exitErr, _ := waitExit(exited, 2*time.Second)
+					diagnosticErr := exitErr
+					if diagnosticErr == nil {
+						diagnosticErr = err
+					}
+					logSSHFailure("две ошибки health-check: "+err.Error(), attempt, p, args, diagnosticErr, stderr.String())
 					return errors.New("прокси не работает")
 				}
 			} else {
@@ -237,12 +275,7 @@ func sshArgs(cfg config.Config, p config.Profile) []string {
 }
 
 func maskArgs(args []string) []string {
-	out := append([]string(nil), args...)
-	for i := 0; i < len(out)-1; i++ {
-		if out[i] == "-i" {
-			out[i+1] = "<путь-к-ключу-скрыт>"
-		}
-	}
+	out := commanddiag.MaskArgs(args)
 	if len(out) > 0 {
 		last := out[len(out)-1]
 		if at := strings.LastIndex(last, "@"); at >= 0 {
@@ -346,7 +379,7 @@ func CheckHTTPViaSocks(socksAddr, rawURL string, timeout time.Duration) error {
 	}
 	defer conn.Close()
 	if u.Scheme == "https" {
-		tlsConn := tls.Client(conn, &tls.Config{ServerName: u.Hostname()})
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: u.Hostname(), MinVersion: tls.VersionTLS12})
 		if err := tlsConn.Handshake(); err != nil {
 			return err
 		}
