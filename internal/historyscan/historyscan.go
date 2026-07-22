@@ -9,17 +9,19 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"tunnelctl/internal/aliasgen"
 	"tunnelctl/internal/config"
 )
 
 type Candidate struct {
-	Command string
-	Source  string
-	Line    int
-	Profile config.Profile
-	Seen    int
+	Command        string
+	Source         string
+	Line           int
+	SourceModified time.Time
+	Profile        config.Profile
+	Seen           int
 }
 
 var zshPrefix = regexp.MustCompile(`^:\s*\d+:\d+;`)
@@ -45,10 +47,24 @@ func Scan(existing config.Config) ([]Candidate, error) {
 	for _, c := range dedup {
 		out = append(out, *c)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].Source+fmt.Sprint(out[i].Line) < out[j].Source+fmt.Sprint(out[j].Line)
-	})
+	sortCandidates(out)
 	return out, nil
+}
+
+func sortCandidates(candidates []Candidate) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		if !left.SourceModified.Equal(right.SourceModified) {
+			return left.SourceModified.After(right.SourceModified)
+		}
+		if left.Source != right.Source {
+			return left.Source < right.Source
+		}
+		if left.Line != right.Line {
+			return left.Line > right.Line
+		}
+		return dedupKey(left.Profile) < dedupKey(right.Profile)
+	})
 }
 
 func historyFiles() []string {
@@ -78,6 +94,10 @@ func scanFile(path string, existing config.Config, used map[string]bool, dedup m
 		return nil
 	}
 	defer f.Close()
+	modified := time.Time{}
+	if info, statErr := f.Stat(); statErr == nil {
+		modified = info.ModTime()
+	}
 	s := bufio.NewScanner(f)
 	lineNo := 0
 	for s.Scan() {
@@ -97,18 +117,35 @@ func scanFile(path string, existing config.Config, used map[string]bool, dedup m
 		if profileExists(existing, p) {
 			continue
 		}
+		key := dedupKey(p)
+		if old, exists := dedup[key]; exists {
+			old.Seen++
+			if occurrenceNewer(modified, path, lineNo, *old) {
+				old.Command = line
+				old.Source = path
+				old.Line = lineNo
+				old.SourceModified = modified
+				old.Profile.Source = path
+			}
+			continue
+		}
 		gen := aliasgen.Generate(aliasgen.Input{User: p.User, Host: p.Host, Key: p.Key}, used)
 		p.Name = gen.Name
 		p.Alias = gen.Alias
 		p.Source = path
-		key := dedupKey(p)
-		if old, exists := dedup[key]; exists {
-			old.Seen++
-			continue
-		}
-		dedup[key] = &Candidate{Command: line, Source: path, Line: lineNo, Profile: p, Seen: 1}
+		dedup[key] = &Candidate{Command: line, Source: path, Line: lineNo, SourceModified: modified, Profile: p, Seen: 1}
 	}
 	return s.Err()
+}
+
+func occurrenceNewer(modified time.Time, source string, line int, old Candidate) bool {
+	if !modified.Equal(old.SourceModified) {
+		return modified.After(old.SourceModified)
+	}
+	if source != old.Source {
+		return source < old.Source
+	}
+	return line > old.Line
 }
 
 func profileExists(cfg config.Config, p config.Profile) bool {
@@ -191,7 +228,6 @@ func ParseSSHCommand(command string) (config.Profile, bool) {
 			case t == "-N" || t == "-f" || t == "-T" || strings.HasPrefix(t, "-v") || t == "-4" || t == "-6":
 				// Старые управляющие опции внешнего ssh нам не нужны.
 			default:
-				// Для неизвестной опции с аргументом грубо пропускаем следующий токен только для известных односимвольных форм.
 				if needsArg(t) && i+1 < len(tokens) {
 					i++
 				}
@@ -228,7 +264,6 @@ func applyOption(p *config.Profile, opt string) {
 		p.Key = value
 	}
 }
-
 func parseTarget(target string, p *config.Profile) {
 	if at := strings.LastIndex(target, "@"); at >= 0 {
 		if p.User == "" {
@@ -240,7 +275,6 @@ func parseTarget(target string, p *config.Profile) {
 		p.Host = strings.Trim(target, "[]")
 	}
 }
-
 func normalizeListen(v string) string {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -254,7 +288,6 @@ func normalizeListen(v string) string {
 	}
 	return v
 }
-
 func atoiDefault(s string, def int) int {
 	var n int
 	_, err := fmt.Sscanf(s, "%d", &n)
@@ -263,14 +296,12 @@ func atoiDefault(s string, def int) int {
 	}
 	return n
 }
-
 func needsArg(opt string) bool {
 	if len(opt) != 2 || !strings.HasPrefix(opt, "-") {
 		return false
 	}
 	return strings.ContainsAny(opt[1:], "bcDeFIJLmOQRSTUVWw")
 }
-
 func splitShell(s string) ([]string, error) {
 	var out []string
 	var b strings.Builder
