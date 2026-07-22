@@ -19,10 +19,10 @@ const (
 )
 
 var (
-	advapi32History  = syscall.NewLazyDLL("advapi32.dll")
-	procRegOpenKey   = advapi32History.NewProc("RegOpenKeyExW")
-	procRegQuery     = advapi32History.NewProc("RegQueryValueExW")
-	procRegCloseKey  = advapi32History.NewProc("RegCloseKey")
+	advapi32History = syscall.NewLazyDLL("advapi32.dll")
+	procRegOpenKey  = advapi32History.NewProc("RegOpenKeyExW")
+	procRegQuery    = advapi32History.NewProc("RegQueryValueExW")
+	procRegCloseKey = advapi32History.NewProc("RegCloseKey")
 )
 
 func totalCommanderRegistryValues(valueName string) []string {
