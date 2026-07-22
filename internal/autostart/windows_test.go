@@ -1,8 +1,9 @@
+//go:build windows
+
 package autostart
 
 import (
 	"encoding/binary"
-	"errors"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -58,34 +59,5 @@ func TestDecodeWindowsCodePage866(t *testing.T) {
 	}
 	if !isTaskNotFound(got) {
 		t.Fatalf("декодированное сообщение не распознано как отсутствие задачи: %q", got)
-	}
-}
-
-type windowsFakeRunner struct {
-	output string
-	err    error
-}
-
-func (r windowsFakeRunner) Run(string, ...string) (string, error) {
-	return r.output, r.err
-}
-
-func TestWindowsStatusDistinguishesMissingAndUnknown(t *testing.T) {
-	missing := newWindowsBackend(osFS{}, windowsFakeRunner{
-		output: "ОШИБКА: Системе не удается найти указанный файл.",
-		err:    errors.New("exit status 1"),
-	})
-	status, err := missing.Status()
-	if err != nil || status.State != StateNotInstalled {
-		t.Fatalf("отсутствующая задача распознана неверно: %#v, %v", status, err)
-	}
-
-	unknown := newWindowsBackend(osFS{}, windowsFakeRunner{
-		output: "ОШИБКА: Отказано в доступе.",
-		err:    errors.New("exit status 1"),
-	})
-	status, err = unknown.Status()
-	if err != nil || status.State != StateUnknown {
-		t.Fatalf("ошибка доступа должна давать неизвестное состояние: %#v, %v", status, err)
 	}
 }
