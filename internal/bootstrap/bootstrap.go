@@ -63,7 +63,7 @@ func run(in *bufio.Reader, out io.Writer, configPath string, deps dependencies) 
 				printManualSetup(out, effectiveConfigPath(configPath))
 			}
 		}
-	} else if len(cfg.Profiles) == 0 && len(cfg.Groups) == 0 {
+	} else {
 		printManualSetup(out, effectiveConfigPath(configPath))
 	}
 
