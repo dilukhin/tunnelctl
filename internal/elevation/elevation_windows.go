@@ -21,16 +21,16 @@ const (
 )
 
 var (
-	advapi32                 = syscall.NewLazyDLL("advapi32.dll")
-	procOpenProcessToken     = advapi32.NewProc("OpenProcessToken")
+	advapi32                = syscall.NewLazyDLL("advapi32.dll")
+	procOpenProcessToken    = advapi32.NewProc("OpenProcessToken")
 	procGetTokenInformation = advapi32.NewProc("GetTokenInformation")
-	kernel32                 = syscall.NewLazyDLL("kernel32.dll")
-	procGetCurrentProcess    = kernel32.NewProc("GetCurrentProcess")
-	procWaitForSingleObject  = kernel32.NewProc("WaitForSingleObject")
-	procGetExitCodeProcess   = kernel32.NewProc("GetExitCodeProcess")
-	procCloseHandle          = kernel32.NewProc("CloseHandle")
-	shell32                  = syscall.NewLazyDLL("shell32.dll")
-	procShellExecuteExW      = shell32.NewProc("ShellExecuteExW")
+	kernel32                = syscall.NewLazyDLL("kernel32.dll")
+	procGetCurrentProcess   = kernel32.NewProc("GetCurrentProcess")
+	procWaitForSingleObject = kernel32.NewProc("WaitForSingleObject")
+	procGetExitCodeProcess  = kernel32.NewProc("GetExitCodeProcess")
+	procCloseHandle         = kernel32.NewProc("CloseHandle")
+	shell32                 = syscall.NewLazyDLL("shell32.dll")
+	procShellExecuteExW     = shell32.NewProc("ShellExecuteExW")
 )
 
 type shellExecuteInfo struct {
