@@ -54,7 +54,7 @@ func scanFarSources(existing config.Config, used map[string]bool, dedup map[stri
 }
 
 func farRoots() []string {
-	roots := []string{os.Getenv("FARHOME")}
+	roots := []string{cleanConfiguredPath(os.Getenv("FARHOME"), "")}
 	if executable, err := exec.LookPath("Far.exe"); err == nil {
 		if absolute, absErr := filepath.Abs(executable); absErr == nil {
 			roots = append(roots, filepath.Dir(absolute))
@@ -77,13 +77,13 @@ func farProfiles(roots []string) ([]string, []string) {
 	appData := os.Getenv("APPDATA")
 	localAppData := os.Getenv("LOCALAPPDATA")
 	profiles := []string{
-		os.Getenv("FARPROFILE"),
-		os.Getenv("FARLOCALPROFILE"),
-		filepath.Join(appData, "Far Manager"),
-		filepath.Join(localAppData, "Far Manager"),
-		filepath.Join(appData, "Far Manager", "Profile"),
-		filepath.Join(localAppData, "Far Manager", "Profile"),
+		cleanConfiguredPath(os.Getenv("FARPROFILE"), ""),
+		cleanConfiguredPath(os.Getenv("FARLOCALPROFILE"), ""),
 	}
+	appendJoinedPath(&profiles, appData, "Far Manager")
+	appendJoinedPath(&profiles, localAppData, "Far Manager")
+	appendJoinedPath(&profiles, appData, "Far Manager", "Profile")
+	appendJoinedPath(&profiles, localAppData, "Far Manager", "Profile")
 	globalMenuDirs := []string{}
 
 	for _, root := range roots {
@@ -106,25 +106,26 @@ func farProfiles(roots []string) ([]string, []string) {
 			userProfile := iniValue(entries, "general", "userprofiledir")
 			if userProfile == "" {
 				userProfile = filepath.Join(root, "Profile")
+			} else {
+				userProfile = cleanConfiguredPath(expandWindowsEnvironment(userProfile, overrides), root)
 			}
-			userProfile = expandWindowsEnvironment(userProfile, overrides)
 			localProfile := iniValue(entries, "general", "userlocalprofiledir")
 			if localProfile == "" {
 				localProfile = userProfile
+			} else {
+				localProfile = cleanConfiguredPath(expandWindowsEnvironment(localProfile, overrides), root)
 			}
-			localProfile = expandWindowsEnvironment(localProfile, overrides)
 			profiles = append(profiles, userProfile, localProfile)
 		case 2:
-			profiles = append(profiles, filepath.Join(appData, "Far Manager"))
+			appendJoinedPath(&profiles, appData, "Far Manager")
 		default:
-			profiles = append(profiles,
-				filepath.Join(appData, "Far Manager"),
-				filepath.Join(localAppData, "Far Manager"),
-			)
+			appendJoinedPath(&profiles, appData, "Far Manager")
+			appendJoinedPath(&profiles, localAppData, "Far Manager")
 		}
 
 		if directory := iniValue(entries, "general", "globalusermenudir"); directory != "" {
-			globalMenuDirs = append(globalMenuDirs, expandWindowsEnvironment(directory, overrides))
+			directory = expandWindowsEnvironment(directory, overrides)
+			globalMenuDirs = append(globalMenuDirs, cleanConfiguredPath(directory, root))
 		}
 	}
 	return uniqueExistingDirectories(profiles), uniqueExistingDirectories(globalMenuDirs)
@@ -144,11 +145,13 @@ func scanTotalCommanderSources(existing config.Config, used map[string]bool, ded
 		_ = scanTotalCommanderINI(path, existing, used, dedup)
 	}
 
-	userCommands := []string{
-		filepath.Join(os.Getenv("COMMANDER_PATH"), "usercmd.ini"),
-		filepath.Join(os.Getenv("APPDATA"), "GHISLER", "usercmd.ini"),
-		filepath.Join(os.Getenv("APPDATA"), "usercmd.ini"),
+	userCommands := []string{}
+	for _, directory := range totalCommanderDirectories() {
+		userCommands = append(userCommands, filepath.Join(directory, "usercmd.ini"))
 	}
+	appData := os.Getenv("APPDATA")
+	appendJoinedPath(&userCommands, appData, "GHISLER", "usercmd.ini")
+	appendJoinedPath(&userCommands, appData, "usercmd.ini")
 	for _, path := range iniFiles {
 		userCommands = append(userCommands, filepath.Join(filepath.Dir(path), "usercmd.ini"))
 	}
@@ -160,13 +163,32 @@ func scanTotalCommanderSources(existing config.Config, used map[string]bool, ded
 func totalCommanderINIFiles() []string {
 	appData := os.Getenv("APPDATA")
 	windowsDir := os.Getenv("WINDIR")
-	commanderPath := os.Getenv("COMMANDER_PATH")
-	paths := []string{
-		os.Getenv("COMMANDER_INI"),
-		filepath.Join(appData, "GHISLER", "wincmd.ini"),
-		filepath.Join(appData, "wincmd.ini"),
-		filepath.Join(windowsDir, "wincmd.ini"),
-		filepath.Join(commanderPath, "wincmd.ini"),
+	directories := totalCommanderDirectories()
+	paths := []string{cleanConfiguredPath(os.Getenv("COMMANDER_INI"), "")}
+	appendJoinedPath(&paths, appData, "GHISLER", "wincmd.ini")
+	appendJoinedPath(&paths, appData, "wincmd.ini")
+	appendJoinedPath(&paths, windowsDir, "wincmd.ini")
+	for _, directory := range directories {
+		paths = append(paths, filepath.Join(directory, "wincmd.ini"))
+	}
+
+	for _, configured := range totalCommanderRegistryValues("IniFileName") {
+		configured = expandWindowsEnvironment(configured, nil)
+		if filepath.IsAbs(strings.Trim(configured, `"`)) {
+			paths = append(paths, cleanConfiguredPath(configured, ""))
+			continue
+		}
+		for _, directory := range directories {
+			paths = append(paths, cleanConfiguredPath(configured, directory))
+		}
+	}
+	return uniqueExistingFiles(paths)
+}
+
+func totalCommanderDirectories() []string {
+	directories := []string{cleanConfiguredPath(os.Getenv("COMMANDER_PATH"), "")}
+	for _, configured := range totalCommanderRegistryValues("InstallDir") {
+		directories = append(directories, cleanConfiguredPath(expandWindowsEnvironment(configured, nil), ""))
 	}
 	for _, variable := range []string{"ProgramFiles", "ProgramFiles(x86)"} {
 		base := os.Getenv(variable)
@@ -174,10 +196,29 @@ func totalCommanderINIFiles() []string {
 			continue
 		}
 		for _, directory := range []string{"totalcmd", "totalcmd64", "Total Commander"} {
-			paths = append(paths, filepath.Join(base, directory, "wincmd.ini"))
+			directories = append(directories, filepath.Join(base, directory))
 		}
 	}
-	return uniqueExistingFiles(paths)
+	return uniqueExistingDirectories(directories)
+}
+
+func cleanConfiguredPath(value, relativeTo string) string {
+	value = strings.TrimSpace(strings.Trim(value, `"`))
+	if value == "" {
+		return ""
+	}
+	value = expandWindowsEnvironment(value, nil)
+	if !filepath.IsAbs(value) && relativeTo != "" {
+		value = filepath.Join(relativeTo, value)
+	}
+	return filepath.Clean(value)
+}
+
+func appendJoinedPath(paths *[]string, base string, elements ...string) {
+	if strings.TrimSpace(base) == "" {
+		return
+	}
+	*paths = append(*paths, filepath.Join(append([]string{base}, elements...)...))
 }
 
 func globINIFiles(directory string) []string {
