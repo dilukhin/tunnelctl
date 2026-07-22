@@ -38,7 +38,16 @@ jobs:
             gofmt.patch
 
       - name: Запустить тесты
-        run: go test ./...
+        run: |
+          set -o pipefail
+          go test ./... 2>&1 | tee go-test.log
+
+      - name: Сохранить журнал упавших тестов
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-test-log
+          path: go-test.log
 
       - name: Запустить go vet
         run: go vet ./...
