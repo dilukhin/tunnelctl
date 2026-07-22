@@ -74,8 +74,19 @@ jobs:
           go-version: '1.22'
 
       - name: Проверить импорт Far и Total Commander
-        shell: cmd
-        run: go test ./internal/historyscan ./cmd/tunnelctl
+        shell: pwsh
+        run: |
+          $output = & go test ./internal/historyscan ./cmd/tunnelctl 2>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object -FilePath windows-test.log
+          exit $code
+
+      - name: Сохранить журнал Windows-тестов
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-log
+          path: windows-test.log
 
   integration-docker:
     name: Docker integration
