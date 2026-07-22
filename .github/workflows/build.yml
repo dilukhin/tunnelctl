@@ -21,6 +21,7 @@ jobs:
         run: |
           files="$(gofmt -l .)"
           printf '%s\n' "$files" > gofmt-files.txt
+          gofmt -d . > gofmt.patch || true
           if [ -n "$files" ]; then
             echo "Следующие файлы требуют gofmt:"
             echo "$files"
@@ -32,7 +33,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gofmt-files
-          path: gofmt-files.txt
+          path: |
+            gofmt-files.txt
+            gofmt.patch
 
       - name: Запустить тесты
         run: go test ./...
