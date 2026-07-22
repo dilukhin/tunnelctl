@@ -43,13 +43,10 @@ func Init() error {
 		mu.Unlock()
 		return fmt.Errorf("не удалось выполнить ротацию логов: %w", err)
 	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
+	if err := openLogLocked(p); err != nil {
 		mu.Unlock()
 		return err
 	}
-	file = f
-	logger = log.New(io.MultiWriter(f), "", 0)
 	mu.Unlock()
 	Info("логирование включено: %s", p)
 	return nil
@@ -74,9 +71,49 @@ func write(level, format string, args ...any) {
 	defer mu.Unlock()
 	line := fmt.Sprintf(format, args...)
 	line = fmt.Sprintf("%s [%s] %s", time.Now().Format("2006-01-02 15:04:05"), level, line)
-	if logger != nil {
-		logger.Println(line)
+	if logger == nil {
+		return
 	}
+	logger.Println(line)
+	if err := rotateActiveLogIfNeededLocked(maxLogSize, time.Now()); err != nil {
+		fmt.Fprintln(os.Stderr, "tunnelctl: не удалось выполнить ротацию активного лога:", err)
+	}
+}
+
+func openLogLocked(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	file = f
+	logger = log.New(io.MultiWriter(f), "", 0)
+	return nil
+}
+
+func rotateActiveLogIfNeededLocked(sizeLimit int64, now time.Time) error {
+	if file == nil {
+		return nil
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() <= sizeLimit {
+		return nil
+	}
+	path := file.Name()
+	if err := file.Close(); err != nil {
+		return err
+	}
+	file = nil
+	logger = nil
+	if err := rotateIfNeeded(path, sizeLimit, now); err != nil {
+		if reopenErr := openLogLocked(path); reopenErr != nil {
+			return fmt.Errorf("%v; повторное открытие лога также не удалось: %w", err, reopenErr)
+		}
+		return err
+	}
+	return openLogLocked(path)
 }
 
 func rotateIfNeeded(path string, sizeLimit int64, now time.Time) error {
