@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"tunnelctl/internal/paths"
+	"tunnelctl/internal/versioninfo"
 )
 
 type stateStore struct {
@@ -20,14 +21,15 @@ func newStateStore(configPath, target, targetType string) *stateStore {
 	return &stateStore{
 		path: paths.StatePath(),
 		data: State{
-			Version:        protocolVersion,
-			PID:            os.Getpid(),
-			StartedAt:      now(),
-			OriginalTarget: target,
-			OriginalType:   targetType,
-			LogPath:        paths.LogPath(),
-			ConfigPath:     configPath,
-			Status:         "запуск",
+			Version:            protocolVersion,
+			ApplicationVersion: versioninfo.Current(),
+			PID:                os.Getpid(),
+			StartedAt:          now(),
+			OriginalTarget:     target,
+			OriginalType:       targetType,
+			LogPath:            paths.LogPath(),
+			ConfigPath:         configPath,
+			Status:             "запуск",
 		},
 	}
 }

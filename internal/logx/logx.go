@@ -2,14 +2,14 @@ package logx
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
+	"tunnelctl/internal/console"
 	"tunnelctl/internal/paths"
+	"tunnelctl/internal/versioninfo"
 )
 
 var (
@@ -36,9 +36,9 @@ func Init() error {
 		return err
 	}
 	file = f
-	logger = log.New(io.MultiWriter(f), "", 0)
+	logger = log.New(f, "", 0)
 	mu.Unlock()
-	Info("логирование включено: %s", p)
+	Info("запуск tunnelctl версии %s; логирование включено: %s", versioninfo.Current(), p)
 	return nil
 }
 
@@ -60,7 +60,7 @@ func write(level, format string, args ...any) {
 	mu.Lock()
 	defer mu.Unlock()
 	line := fmt.Sprintf(format, args...)
-	line = fmt.Sprintf("%s [%s] %s", time.Now().Format("2006-01-02 15:04:05"), level, line)
+	line = fmt.Sprintf("%s [%s] %s", console.Timestamp(), level, line)
 	if logger != nil {
 		logger.Println(line)
 	}
