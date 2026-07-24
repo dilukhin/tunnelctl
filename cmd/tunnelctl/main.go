@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"tunnelctl/internal/app"
+	"tunnelctl/internal/bootstrap"
 	"tunnelctl/internal/config"
 	"tunnelctl/internal/console"
+	"tunnelctl/internal/elevation"
 	"tunnelctl/internal/logx"
 	"tunnelctl/internal/sshproxy"
 	"tunnelctl/internal/supervisor"
@@ -16,7 +20,16 @@ import (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:]))
+	args := os.Args[1:]
+	handled, exitCode, err := elevation.MaybeRelaunch(args)
+	if err != nil {
+		console.WriteLevel(os.Stderr, "ОШИБКА", "%v", err)
+		os.Exit(1)
+	}
+	if handled {
+		os.Exit(exitCode)
+	}
+	os.Exit(run(args))
 }
 
 func run(args []string) int {
@@ -28,6 +41,19 @@ func run(args []string) int {
 		} else {
 			defer restore()
 		}
+	}
+
+	if isImportCommand(args) {
+		configPath, err := parseImportArgs(args[1:])
+		if err != nil {
+			console.WriteLevel(os.Stderr, "ОШИБКА", "%v", err)
+			return 1
+		}
+		if err := bootstrap.RunImport(configPath); err != nil {
+			console.WriteLevel(os.Stderr, "ОШИБКА", "%v", err)
+			return 1
+		}
+		return 0
 	}
 
 	if isRestartCommand(args) {
@@ -44,7 +70,8 @@ func run(args []string) int {
 	}
 	printVersionDetails(args)
 	if isGeneralHelp(args) {
-		fmt.Println("\nДополнительная команда:")
+		fmt.Println("\nДополнительные команды:")
+		fmt.Println("  tunnelctl import                  повторно импортировать команды ssh -D")
 		fmt.Println("  tunnelctl restart                 перезапустить управляемый tunnelctl текущим бинарником")
 	}
 	return 0
@@ -90,12 +117,38 @@ func printVersionDetails(args []string) {
 	}
 }
 
+func isImportCommand(args []string) bool {
+	return len(args) > 0 && args[0] == "import"
+}
+
 func isRestartCommand(args []string) bool {
 	return len(args) > 0 && args[0] == "restart"
 }
 
 func isGeneralHelp(args []string) bool {
 	return len(args) > 0 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h")
+}
+
+func parseImportArgs(args []string) (string, error) {
+	configPath := ""
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		switch {
+		case argument == "--config" || argument == "-config":
+			if index+1 >= len(args) {
+				return "", errors.New("после --config нужен путь")
+			}
+			configPath = args[index+1]
+			index++
+		case strings.HasPrefix(argument, "--config="):
+			configPath = strings.TrimPrefix(argument, "--config=")
+		case strings.HasPrefix(argument, "-config="):
+			configPath = strings.TrimPrefix(argument, "-config=")
+		default:
+			return "", fmt.Errorf("лишний аргумент import: %s", argument)
+		}
+	}
+	return configPath, nil
 }
 
 var restartHealthCheck = checkRestartHealth
