@@ -54,15 +54,23 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
-	defer server.Close()
 
 	store := newStateStore(opts.ConfigPath, opts.Target, targetType)
 	if err := store.update(func(s *State) { s.Status = "ожидание запуска" }); err != nil {
+		_ = server.Close()
+		store.remove()
 		return err
 	}
-	defer store.remove()
 
-	return runLoop(ctx, opts, profiles, targetType == "group", server, store)
+	runErr := runLoop(ctx, opts, profiles, targetType == "group", server, store)
+	_ = server.Close()
+	store.remove()
+
+	var restartErr *restartRequestedError
+	if errors.As(runErr, &restartErr) {
+		return replaceCurrentProcess(restartErr.executable, opts)
+	}
+	return runErr
 }
 
 func resolveTarget(cfg config.Config, target string) (string, []config.Profile, error) {
@@ -74,7 +82,7 @@ func resolveTarget(cfg config.Config, target string) (string, []config.Profile, 
 		return "", nil, fmt.Errorf("профиль или группа не найдены: %s", target)
 	}
 	if len(g.Profiles) == 0 {
-		return "", nil, fmt.Errorf("группа %s пустая", target)
+		return "", nil, fmt.Errorf("группа %s пуста", target)
 	}
 	profiles := make([]config.Profile, 0, len(g.Profiles))
 	for _, name := range g.Profiles {
@@ -128,6 +136,8 @@ func runLoop(ctx context.Context, opts Options, groupProfiles []config.Profile, 
 
 		switchRequested := false
 		var stopReply func(Response)
+		var restartReply func(Response)
+		restartExecutable := ""
 		healthy := false
 
 	attempt:
@@ -195,6 +205,10 @@ func runLoop(ctx context.Context, opts Options, groupProfiles []config.Profile, 
 					snapshot := store.snapshot()
 					env.Reply(Response{OK: true, State: &snapshot})
 				case "stop":
+					if restartReply != nil {
+						env.Reply(Response{OK: false, Error: "перезапуск уже выполняется"})
+						continue
+					}
 					if stopReply != nil {
 						env.Reply(Response{OK: false, Error: "остановка уже выполняется"})
 						continue
@@ -202,7 +216,34 @@ func runLoop(ctx context.Context, opts Options, groupProfiles []config.Profile, 
 					stopReply = env.Reply
 					_ = store.update(func(s *State) { s.Status = "остановка" })
 					cancelAttempt()
+				case "restart":
+					if stopReply != nil {
+						env.Reply(Response{OK: false, Error: "остановка уже выполняется"})
+						continue
+					}
+					if restartReply != nil {
+						env.Reply(Response{OK: false, Error: "перезапуск уже выполняется"})
+						continue
+					}
+					if pending != nil || switchRequested {
+						env.Reply(Response{OK: false, Error: "нельзя перезапустить tunnelctl во время переключения профиля"})
+						continue
+					}
+					executable, err := validateRestartExecutable(env.Request.Executable)
+					if err != nil {
+						env.Reply(Response{OK: false, Error: err.Error()})
+						continue
+					}
+					restartExecutable = executable
+					restartReply = env.Reply
+					logx.Info("получена команда перезапуска tunnelctl")
+					_ = store.update(func(s *State) { s.Status = "перезапуск" })
+					cancelAttempt()
 				case "switch":
+					if stopReply != nil || restartReply != nil {
+						env.Reply(Response{OK: false, Error: "остановка или перезапуск уже выполняется"})
+						continue
+					}
 					if pending != nil || switchRequested {
 						env.Reply(Response{OK: false, Error: "переключение уже выполняется"})
 						continue
@@ -228,6 +269,17 @@ func runLoop(ctx context.Context, opts Options, groupProfiles []config.Profile, 
 
 			case err := <-result:
 				cancelAttempt()
+				if restartReply != nil {
+					if waitErr := sshproxy.WaitPortFree(context.Background(), current.EffectiveListen(opts.Config), 5*time.Second); waitErr != nil {
+						restartReply(Response{OK: false, Error: waitErr.Error()})
+						restartReply = nil
+						restartExecutable = ""
+						break attempt
+					}
+					_ = store.update(func(s *State) { s.Status = "запуск нового экземпляра" })
+					restartReply(Response{OK: true, Message: "Команда перезапуска принята"})
+					return &restartRequestedError{executable: restartExecutable}
+				}
 				if stopReply != nil {
 					_ = store.update(func(s *State) { s.Status = "остановлен" })
 					stopReply(Response{OK: true, Message: "Управляемый туннель остановлен"})
@@ -383,6 +435,18 @@ func Status(ctx context.Context) (State, error) {
 // Stop корректно останавливает работающий супервизор.
 func Stop(ctx context.Context) (string, error) {
 	resp, err := request(ctx, Request{Action: "stop"})
+	if err != nil {
+		return "", err
+	}
+	if !resp.OK {
+		return "", errors.New(resp.Error)
+	}
+	return resp.Message, nil
+}
+
+// Restart корректно завершает дочерний SSH и просит супервизор заменить себя указанным бинарником.
+func Restart(ctx context.Context, executable string) (string, error) {
+	resp, err := request(ctx, Request{Action: "restart", Executable: executable})
 	if err != nil {
 		return "", err
 	}
