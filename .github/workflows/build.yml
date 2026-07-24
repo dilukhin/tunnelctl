@@ -62,7 +62,7 @@ jobs:
         run: GOOS=android GOARCH=arm64 go build -o dist/tunnelctl-android-arm64 ./cmd/tunnelctl
 
   test-windows:
-    name: Windows import tests
+    name: Windows runtime tests
     runs-on: windows-latest
     steps:
       - name: Получить исходники
@@ -73,10 +73,10 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Проверить импорт Far и Total Commander
+      - name: Проверить Windows-специфичное поведение
         shell: pwsh
         run: |
-          $output = & go test ./internal/historyscan ./cmd/tunnelctl 2>&1
+          $output = & go test ./internal/elevation ./internal/historyscan ./cmd/tunnelctl 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath windows-test.log
           exit $code
