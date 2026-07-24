@@ -23,6 +23,8 @@ const (
 	pipeRejectRemoteClients   = 0x00000008
 	pipeUnlimitedInstances    = 255
 	errorPipeConnected        = syscall.Errno(535)
+	errorPipeBusy             = syscall.Errno(231)
+	errorAccessDenied         = syscall.Errno(5)
 )
 
 var (
@@ -56,6 +58,9 @@ func platformListen() (controlServer, error) {
 		0,
 	)
 	if handle == uintptr(syscall.InvalidHandle) {
+		if errors.Is(callErr, errorAccessDenied) || errors.Is(callErr, errorPipeBusy) {
+			return nil, ErrAlreadyRunning
+		}
 		return nil, fmt.Errorf("не удалось создать именованный канал tunnelctl: %w", callErr)
 	}
 	h := syscall.Handle(handle)

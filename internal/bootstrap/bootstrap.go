@@ -2,9 +2,12 @@ package bootstrap
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"tunnelctl/internal/config"
@@ -13,129 +16,262 @@ import (
 	"tunnelctl/internal/shortcut"
 )
 
+const maxImportCandidates = 10
+
+type dependencies struct {
+	ensure    func(string) (config.Config, bool, error)
+	save      func(string, config.Config) error
+	scan      func(config.Config) ([]historyscan.Candidate, error)
+	shortcuts func(*bufio.Reader, config.Config) error
+	goos      string
+}
+
+func defaultDependencies() dependencies {
+	return dependencies{
+		ensure:    config.Ensure,
+		save:      config.Save,
+		scan:      historyscan.Scan,
+		shortcuts: shortcut.CreateInteractive,
+		goos:      runtime.GOOS,
+	}
+}
+
 // Run запускает интерактивный мастер настройки.
 func Run(configPath string) error {
-	in := bufio.NewReader(os.Stdin)
-	fmt.Println("Мастер настройки tunnelctl")
-	fmt.Println("Платформа:", runtime.GOOS, runtime.GOARCH)
-	fmt.Println("Конфиг:", effectiveConfigPath(configPath))
+	return run(bufio.NewReader(os.Stdin), os.Stdout, configPath, defaultDependencies())
+}
 
-	cfg, created, err := config.Ensure(configPath)
+// RunImport повторно сканирует поддерживаемые истории и импортирует новые ssh -D туннели.
+func RunImport(configPath string) error {
+	deps := defaultDependencies()
+	cfg, created, err := deps.ensure(configPath)
+	if err != nil {
+		return fmt.Errorf("не удалось подготовить конфиг: %w", err)
+	}
+	fmt.Println("Повторный импорт ssh -D туннелей")
+	fmt.Println("Конфиг:", effectiveConfigPath(configPath))
+	if created {
+		fmt.Println("Создан новый конфиг.")
+	} else {
+		fmt.Printf("Уже настроено профилей: %d. Они не будут импортированы повторно.\n", len(cfg.Profiles))
+	}
+	_, err = importHistory(bufio.NewReader(os.Stdin), os.Stdout, &cfg, configPath, deps.scan, deps.save)
+	if err != nil {
+		return fmt.Errorf("импорт истории завершился с ошибкой: %w", err)
+	}
+	return nil
+}
+
+func run(in *bufio.Reader, out io.Writer, configPath string, deps dependencies) error {
+	fmt.Fprintln(out, "Мастер настройки tunnelctl")
+	fmt.Fprintln(out, "Платформа:", deps.goos, runtime.GOARCH)
+	fmt.Fprintln(out, "Конфиг:", effectiveConfigPath(configPath))
+
+	cfg, created, err := deps.ensure(configPath)
 	if err != nil {
 		return fmt.Errorf("не удалось подготовить конфиг: %w", err)
 	}
 	if created {
-		fmt.Println("Создан новый конфиг.")
+		fmt.Fprintln(out, "Создан новый конфиг.")
 	} else {
-		fmt.Println("Найден существующий конфиг.")
+		fmt.Fprintln(out, "Найден существующий конфиг.")
 	}
 
-	if ask(in, "Просканировать историю команд и импортировать ssh -D туннели?", true) {
-		if err := importHistory(in, &cfg, configPath); err != nil {
-			fmt.Println("Предупреждение: импорт истории завершился с ошибкой:", err)
+	if ask(in, out, "Просканировать истории PowerShell/Far Manager/Total Commander и импортировать ssh -D туннели?", true) {
+		if _, err := importHistory(in, out, &cfg, configPath, deps.scan, deps.save); err != nil {
+			fmt.Fprintln(out, "Предупреждение: импорт истории завершился с ошибкой:", err)
+			if len(cfg.Profiles) == 0 && len(cfg.Groups) == 0 {
+				printManualSetup(out, effectiveConfigPath(configPath))
+			}
 		}
+	} else {
+		printManualSetup(out, effectiveConfigPath(configPath))
 	}
 
 	if len(cfg.Profiles) > 1 && len(cfg.Groups) == 0 {
-		if ask(in, "Создать failover-группу auto из найденных профилей?", true) {
+		if ask(in, out, "Создать failover-группу auto из найденных профилей?", true) {
 			profiles := make([]string, 0, len(cfg.Profiles))
-			for _, p := range cfg.Profiles {
-				profiles = append(profiles, p.Name)
+			for _, profile := range cfg.Profiles {
+				profiles = append(profiles, profile.Name)
 			}
 			cfg.Groups = append(cfg.Groups, config.Group{Name: "auto", Alias: "auto", Strategy: "failover", Profiles: profiles})
-			_ = config.Save(configPath, cfg)
-			fmt.Println("Группа auto создана.")
+			if err := deps.save(configPath, cfg); err != nil {
+				return fmt.Errorf("не удалось сохранить группу auto: %w", err)
+			}
+			fmt.Fprintln(out, "Группа auto создана.")
 		}
 	}
 
-	if ask(in, "Создать ярлыки/скрипты запуска для доступной платформы?", true) {
-		if err := shortcut.CreateInteractive(in, cfg); err != nil {
-			fmt.Println("Предупреждение: ярлыки не созданы:", err)
+	if len(cfg.Profiles) > 0 || len(cfg.Groups) > 0 {
+		if ask(in, out, "Создать ярлыки/скрипты запуска для доступной платформы?", true) {
+			if err := deps.shortcuts(in, cfg); err != nil {
+				fmt.Fprintln(out, "Предупреждение: ярлыки не созданы:", err)
+			}
 		}
 	}
 
-	fmt.Println()
-	fmt.Println("Готово. Основные команды:")
-	fmt.Println("  tunnelctl")
-	fmt.Println("  tunnelctl connect <алиас-или-имя>")
-	fmt.Println("  tunnelctl connect auto")
-	fmt.Println("  tunnelctl doctor")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Готово. Основные команды:")
+	fmt.Fprintln(out, "  tunnelctl")
+	fmt.Fprintln(out, "  tunnelctl import")
+	fmt.Fprintln(out, "  tunnelctl connect <алиас-или-имя>")
+	if len(cfg.Groups) > 0 {
+		fmt.Fprintln(out, "  tunnelctl connect auto")
+	}
+	fmt.Fprintln(out, "  tunnelctl doctor")
 	return nil
 }
 
-func effectiveConfigPath(p string) string {
-	if p != "" {
-		return p
+func effectiveConfigPath(path string) string {
+	if path != "" {
+		return path
 	}
 	return paths.ConfigPath()
 }
 
-func importHistory(in *bufio.Reader, cfg *config.Config, configPath string) error {
-	cands, err := historyscan.Scan(*cfg)
+type scanFunc func(config.Config) ([]historyscan.Candidate, error)
+type saveFunc func(string, config.Config) error
+
+func importHistory(in *bufio.Reader, out io.Writer, cfg *config.Config, configPath string, scan scanFunc, save saveFunc) (int, error) {
+	candidates, err := scan(*cfg)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if len(cands) == 0 {
-		fmt.Println("Подходящие команды ssh -D в истории не найдены.")
-		return nil
+	if len(candidates) == 0 {
+		if len(cfg.Profiles) > 0 {
+			fmt.Fprintln(out, "Новых ssh -D туннелей в поддерживаемых источниках не найдено.")
+			fmt.Fprintln(out, "Повторить импорт позже: tunnelctl import")
+		} else {
+			fmt.Fprintln(out, "Подходящие команды ssh -D в поддерживаемых источниках не найдены.")
+			printManualSetup(out, effectiveConfigPath(configPath))
+		}
+		return 0, nil
 	}
-	fmt.Printf("Найдено кандидатов: %d\n", len(cands))
-	for i, c := range cands {
-		fmt.Println()
-		fmt.Printf("[%d] %s\n", i+1, c.Command)
-		fmt.Printf("    Источник: %s:%d, повторов: %d\n", c.Source, c.Line, c.Seen)
-		fmt.Printf("    Пользователь: %s\n", c.Profile.User)
-		fmt.Printf("    Сервер:       %s:%d\n", c.Profile.Host, c.Profile.Port)
-		fmt.Printf("    Ключ:         %s\n", emptyAsDash(c.Profile.Key))
-		fmt.Printf("    Локально:     %s\n", c.Profile.Listen)
-		fmt.Printf("    Имя профиля:  %s\n", c.Profile.Name)
-		fmt.Printf("    Алиас:        %s\n", c.Profile.Alias)
-		if !ask(in, "Добавить этот профиль?", true) {
+
+	shown := candidates
+	if len(shown) > maxImportCandidates {
+		shown = shown[:maxImportCandidates]
+	}
+	fmt.Fprintf(out, "Найдено новых уникальных туннелей: %d. Показано кандидатов: %d.\n", len(candidates), len(shown))
+	if len(candidates) > maxImportCandidates {
+		fmt.Fprintf(out, "Импорт ограничен первыми %d кандидатами; остальные %d не показаны.\n", maxImportCandidates, len(candidates)-maxImportCandidates)
+	}
+	for index, candidate := range shown {
+		profile := candidate.Profile
+		fmt.Fprintf(out, "  %d. %s@%s, SOCKS %s, ключ %s, имя %s, алиас %s\n",
+			index+1, profile.User, profile.Address(), profile.EffectiveListen(*cfg), emptyAsDash(profile.Key), profile.Name, emptyAsDash(profile.Alias))
+		fmt.Fprintf(out, "     источник: %s\n", candidate.Source)
+	}
+
+	for {
+		fmt.Fprint(out, "Номера для импорта через запятую (пусто — не импортировать): ")
+		line, readErr := in.ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return 0, readErr
+		}
+		indexes, declined, parseErr := parseSelection(line, len(shown))
+		if parseErr != nil {
+			fmt.Fprintln(out, "Неверный выбор:", parseErr)
+			if errors.Is(readErr, io.EOF) {
+				return 0, parseErr
+			}
 			continue
 		}
-		p := c.Profile
-		if ask(in, "Отредактировать имя/алиас/порт перед добавлением?", false) {
-			p.Name = askString(in, "Имя профиля", p.Name)
-			p.Alias = askString(in, "Алиас", p.Alias)
-			p.Listen = askString(in, "Локальный адрес", p.Listen)
-			p.Key = askString(in, "Ключ", p.Key)
+		if declined {
+			fmt.Fprintln(out, "Импорт не выполнен.")
+			fmt.Fprintln(out, "Повторить импорт позже: tunnelctl import")
+			if len(cfg.Profiles) == 0 && len(cfg.Groups) == 0 {
+				printManualSetup(out, effectiveConfigPath(configPath))
+			}
+			return 0, nil
 		}
-		cfg.Profiles = append(cfg.Profiles, p)
-		if err := config.Save(configPath, *cfg); err != nil {
-			return err
+
+		next := *cfg
+		next.Profiles = append([]config.Profile(nil), cfg.Profiles...)
+		for _, index := range indexes {
+			next.Profiles = append(next.Profiles, shown[index].Profile)
 		}
-		fmt.Println("Профиль добавлен.")
+		if err := next.Validate(); err != nil {
+			fmt.Fprintln(out, "Выбранные профили нельзя добавить:", err)
+			if errors.Is(readErr, io.EOF) {
+				return 0, err
+			}
+			continue
+		}
+		if err := save(configPath, next); err != nil {
+			return 0, err
+		}
+		*cfg = next
+
+		fmt.Fprintf(out, "Импортировано профилей: %d. Конфиг сохранён: %s\n", len(indexes), effectiveConfigPath(configPath))
+		for item, index := range indexes {
+			profile := shown[index].Profile
+			fmt.Fprintf(out, "  %d. %s, алиас %s, %s@%s, SOCKS %s\n",
+				item+1, profile.Name, emptyAsDash(profile.Alias), profile.User, profile.Address(), profile.EffectiveListen(next))
+		}
+		fmt.Fprintln(out, "Повторить поиск новых туннелей позже: tunnelctl import")
+		return len(indexes), nil
 	}
-	return nil
 }
 
-func emptyAsDash(s string) string {
-	if s == "" {
+func parseSelection(value string, max int) ([]int, bool, error) {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" || value == "n" || value == "no" || value == "н" || value == "нет" || value == "-" {
+		return nil, true, nil
+	}
+	parts := strings.Split(value, ",")
+	seen := make(map[int]bool, len(parts))
+	indexes := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, false, errors.New("между запятыми должен быть номер")
+		}
+		number, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, false, fmt.Errorf("%q не является номером", part)
+		}
+		if number < 1 || number > max {
+			return nil, false, fmt.Errorf("номер %d вне диапазона 1..%d", number, max)
+		}
+		if seen[number] {
+			return nil, false, fmt.Errorf("номер %d указан повторно", number)
+		}
+		seen[number] = true
+		indexes = append(indexes, number-1)
+	}
+	return indexes, false, nil
+}
+
+func printManualSetup(out io.Writer, configPath string) {
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Настройка вручную:")
+	fmt.Fprintln(out, "  Файл:", configPath)
+	fmt.Fprintln(out, `  Добавь в profiles профиль вида:`)
+	fmt.Fprintln(out, `    {"name":"my-tunnel","alias":"my","user":"user","host":"example.com","port":22,"key":"~/.ssh/id_ed25519","listen":"127.0.0.1:1080"}`)
+	fmt.Fprintln(out, "  Повторный импорт: tunnelctl import")
+	fmt.Fprintln(out, "  Проверка:         tunnelctl doctor")
+	fmt.Fprintln(out, "  Запуск:           tunnelctl connect my-tunnel")
+	fmt.Fprintln(out)
+}
+
+func emptyAsDash(value string) string {
+	if value == "" {
 		return "-"
 	}
-	return s
+	return value
 }
 
-func ask(in *bufio.Reader, q string, def bool) bool {
+func ask(in *bufio.Reader, out io.Writer, question string, fallback bool) bool {
 	suffix := "[Y/n]"
-	if !def {
+	if !fallback {
 		suffix = "[y/N]"
 	}
-	fmt.Printf("%s %s ", q, suffix)
+	fmt.Fprintf(out, "%s %s ", question, suffix)
 	line, _ := in.ReadString('\n')
 	line = strings.TrimSpace(strings.ToLower(line))
 	if line == "" {
-		return def
+		return fallback
 	}
 	return line == "y" || line == "yes" || line == "д" || line == "да"
-}
-
-func askString(in *bufio.Reader, q, def string) string {
-	fmt.Printf("%s [%s]: ", q, def)
-	line, _ := in.ReadString('\n')
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return def
-	}
-	return line
 }

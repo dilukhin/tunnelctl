@@ -18,10 +18,36 @@ jobs:
           go-version: '1.22'
 
       - name: Проверить gofmt
-        run: test -z "$(gofmt -l .)"
+        run: |
+          files="$(gofmt -l .)"
+          printf '%s\n' "$files" > gofmt-files.txt
+          gofmt -d . > gofmt.patch || true
+          if [ -n "$files" ]; then
+            echo "Следующие файлы требуют gofmt:"
+            echo "$files"
+            exit 1
+          fi
+
+      - name: Сохранить диагностику gofmt
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gofmt-files
+          path: |
+            gofmt-files.txt
+            gofmt.patch
 
       - name: Запустить тесты
-        run: go test ./...
+        run: |
+          set -o pipefail
+          go test ./... 2>&1 | tee go-test.log
+
+      - name: Сохранить журнал упавших тестов
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-test-log
+          path: go-test.log
 
       - name: Запустить go vet
         run: go vet ./...
@@ -34,6 +60,33 @@ jobs:
 
       - name: Собрать Android arm64
         run: GOOS=android GOARCH=arm64 go build -o dist/tunnelctl-android-arm64 ./cmd/tunnelctl
+
+  test-windows:
+    name: Windows runtime tests
+    runs-on: windows-latest
+    steps:
+      - name: Получить исходники
+        uses: actions/checkout@v4
+
+      - name: Установить Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Проверить Windows-специфичное поведение
+        shell: pwsh
+        run: |
+          $output = & go test ./internal/elevation ./internal/historyscan ./cmd/tunnelctl 2>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object -FilePath windows-test.log
+          exit $code
+
+      - name: Сохранить журнал Windows-тестов
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-log
+          path: windows-test.log
 
   integration-docker:
     name: Docker integration
