@@ -24,7 +24,7 @@ import (
 	"tunnelctl/internal/supervisor"
 )
 
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 func Run(args []string) error {
 	if err := logx.Init(); err != nil {
