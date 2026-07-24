@@ -10,6 +10,7 @@ import (
 	"tunnelctl/internal/config"
 	"tunnelctl/internal/console"
 	"tunnelctl/internal/logx"
+	"tunnelctl/internal/sshproxy"
 	"tunnelctl/internal/supervisor"
 	"tunnelctl/internal/versioninfo"
 )
@@ -97,6 +98,38 @@ func isGeneralHelp(args []string) bool {
 	return len(args) > 0 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h")
 }
 
+var restartHealthCheck = checkRestartHealth
+
+func checkRestartHealth(state supervisor.State) error {
+	if state.ActiveProfile == "" || state.Listen == "" {
+		return fmt.Errorf("новый экземпляр ещё не сообщил активный профиль и SOCKS-адрес")
+	}
+	cfg, err := config.Load(state.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("не удалось прочитать конфигурацию нового экземпляра: %w", err)
+	}
+	profile, ok := cfg.ProfileByName(state.ActiveProfile)
+	if !ok {
+		return fmt.Errorf("активный профиль %s отсутствует в конфигурации", state.ActiveProfile)
+	}
+	timeout := time.Duration(cfg.Defaults.HealthTimeoutSec) * time.Second
+	return sshproxy.CheckHTTPViaSocks(state.Listen, profile.EffectiveHealthURL(cfg), timeout)
+}
+
+func restartStateReady(state supervisor.State) (bool, error) {
+	switch state.Status {
+	case "работает":
+		return true, nil
+	case "SOCKS-порт открыт, выполняется проверка":
+		if err := restartHealthCheck(state); err != nil {
+			return false, fmt.Errorf("проверка SOCKS после перезапуска не прошла: %w", err)
+		}
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
 func runRestart(args []string) error {
 	if len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
 		fmt.Println("Использование: tunnelctl restart")
@@ -139,12 +172,17 @@ func runRestart(args []string) error {
 		cancel()
 		if statusErr == nil {
 			lastStatus = state.Status
-			if !state.StartedAt.Equal(oldState.StartedAt) && state.Status == "работает" {
+			if !state.StartedAt.Equal(oldState.StartedAt) {
 				if state.ApplicationVersion != versioninfo.Current() {
 					return fmt.Errorf("запущена неожиданная версия tunnelctl: %s вместо %s", state.ApplicationVersion, versioninfo.Current())
 				}
-				console.WriteLevel(os.Stdout, "ИНФО", "tunnelctl %s перезапущен; активный профиль: %s", state.ApplicationVersion, state.ActiveProfile)
-				return nil
+				ready, readyErr := restartStateReady(state)
+				if readyErr != nil {
+					lastStatus = readyErr.Error()
+				} else if ready {
+					console.WriteLevel(os.Stdout, "ИНФО", "tunnelctl %s перезапущен; активный профиль: %s", state.ApplicationVersion, state.ActiveProfile)
+					return nil
+				}
 			}
 		}
 		time.Sleep(250 * time.Millisecond)
