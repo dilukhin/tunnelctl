@@ -133,3 +133,22 @@ func captureStdout(t *testing.T, fn func()) string {
 	}
 	return string(data)
 }
+
+func TestVersionDoesNotCreateStateOrLog(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", root)
+	t.Setenv("LOCALAPPDATA", root)
+	for _, arg := range []string{"version", "--version", "-v"} {
+		output := captureStdout(t, func() {
+			if err := Run([]string{arg}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if strings.TrimSpace(output) != "tunnelctl "+Version {
+			t.Fatalf("неверная версия для %s: %q", arg, output)
+		}
+		if _, err := os.Stat(filepath.Join(root, "tunnelctl")); !os.IsNotExist(err) {
+			t.Fatalf("version создал каталог состояния для %s: %v", arg, err)
+		}
+	}
+}

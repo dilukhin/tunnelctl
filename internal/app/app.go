@@ -27,6 +27,12 @@ import (
 const Version = "0.2.0"
 
 func Run(args []string) error {
+	// Version is used by read-only inventory and health checks. Do not create
+	// state directories or rotate logs just to identify the executable.
+	if len(args) > 0 && (args[0] == "version" || args[0] == "--version" || args[0] == "-v") {
+		fmt.Println("tunnelctl", Version)
+		return nil
+	}
 	if err := logx.Init(); err != nil {
 		fmt.Println("Предупреждение: не удалось включить логирование:", err)
 	}
@@ -51,9 +57,6 @@ func Run(args []string) error {
 		return cmdAutostart(args[1:])
 	case "help", "--help", "-h":
 		printHelp()
-		return nil
-	case "version", "--version", "-v":
-		fmt.Println("tunnelctl", Version)
 		return nil
 	default:
 		return fmt.Errorf("неизвестная команда: %s", args[0])
