@@ -82,7 +82,6 @@ func TestRestartStateReadyTrustsSupervisorHealthSuccess(t *testing.T) {
 	}
 }
 
-
 func TestReportEarlyErrorIncludesBuildIdentity(t *testing.T) {
 	versioninfo.Set(app.Version)
 	old := os.Stderr

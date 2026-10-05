@@ -34,7 +34,7 @@ func Current() string {
 	return current.Load().(string)
 }
 
-// BuildCommit возвращает полный SHA исходного коммита production-сборки.
+// BuildCommit возвращает полный SHA исходного коммита выпускной сборки.
 // Для локальной сборки без внедрённого SHA возвращается "unknown".
 func BuildCommit() string {
 	commit := strings.ToLower(strings.TrimSpace(buildCommit))

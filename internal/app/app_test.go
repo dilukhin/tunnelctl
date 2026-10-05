@@ -154,7 +154,6 @@ func TestVersionDoesNotCreateStateOrLog(t *testing.T) {
 	}
 }
 
-
 func TestDoctorShowsBuildIdentity(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "tunnelctl.json")
 	cfg := config.DefaultConfig()
