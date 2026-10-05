@@ -21,15 +21,20 @@ import (
 
 func main() {
 	args := os.Args[1:]
+	versioninfo.Set(app.Version)
 	handled, exitCode, err := elevation.MaybeRelaunch(args)
 	if err != nil {
-		console.WriteLevel(os.Stderr, "ОШИБКА", "%v", err)
+		reportEarlyError(err)
 		os.Exit(1)
 	}
 	if handled {
 		os.Exit(exitCode)
 	}
 	os.Exit(run(args))
+}
+
+func reportEarlyError(err error) {
+	console.WriteLevel(os.Stderr, "ОШИБКА", "tunnelctl %s: %v", versioninfo.Current(), err)
 }
 
 func run(args []string) int {
@@ -105,6 +110,7 @@ func printVersionDetails(args []string) {
 	}
 	switch args[0] {
 	case "status":
+		fmt.Println("Версия вызванного tunnelctl:", versioninfo.Current())
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		state, err := supervisor.Status(ctx)

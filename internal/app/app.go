@@ -22,15 +22,17 @@ import (
 	"tunnelctl/internal/paths"
 	"tunnelctl/internal/sshproxy"
 	"tunnelctl/internal/supervisor"
+	"tunnelctl/internal/versioninfo"
 )
 
 const Version = "0.3.0"
 
 func Run(args []string) error {
+	versioninfo.Set(Version)
 	// Version is used by read-only inventory and health checks. Do not create
 	// state directories or rotate logs just to identify the executable.
 	if len(args) > 0 && (args[0] == "version" || args[0] == "--version" || args[0] == "-v") {
-		fmt.Println("tunnelctl", Version)
+		fmt.Println("tunnelctl", versioninfo.Current())
 		return nil
 	}
 	if err := logx.Init(); err != nil {
@@ -534,7 +536,8 @@ func cmdDoctor(args []string) error {
 		return err
 	}
 	fmt.Println("Диагностика tunnelctl")
-	fmt.Println("Версия:", Version)
+	fmt.Println("Версия:", versioninfo.Current())
+	fmt.Println("SHA исходного коммита:", versioninfo.BuildCommit())
 	fmt.Println("Платформа:", runtime.GOOS, runtime.GOARCH)
 	fmt.Println("Конфиг:", config.EffectivePath(configPath))
 	fmt.Println("Лог:", paths.LogPath())

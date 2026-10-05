@@ -157,7 +157,7 @@ func TestLogContainsTimestampAndApplicationVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	if !strings.Contains(text, "запуск tunnelctl версии 1.2.3-test") {
+	if !strings.Contains(text, "запуск tunnelctl версии "+versioninfo.Current()) {
 		t.Fatalf("версия не записана в лог: %s", text)
 	}
 	linePattern := regexp.MustCompile(`(?m)^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} \[(ИНФО|ПРЕДУПРЕЖДЕНИЕ|ОШИБКА)\] `)

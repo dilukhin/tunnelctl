@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"tunnelctl/internal/config"
+	"tunnelctl/internal/versioninfo"
 )
 
 func TestResolveGroupProfilesKeepsConfiguredOrder(t *testing.T) {
@@ -144,11 +145,31 @@ func TestVersionDoesNotCreateStateOrLog(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
-		if strings.TrimSpace(output) != "tunnelctl "+Version {
+		if strings.TrimSpace(output) != "tunnelctl "+versioninfo.Current() {
 			t.Fatalf("неверная версия для %s: %q", arg, output)
 		}
 		if _, err := os.Stat(filepath.Join(root, "tunnelctl")); !os.IsNotExist(err) {
 			t.Fatalf("version создал каталог состояния для %s: %v", arg, err)
 		}
+	}
+}
+
+
+func TestDoctorShowsBuildIdentity(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "tunnelctl.json")
+	cfg := config.DefaultConfig()
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	output := captureStdout(t, func() {
+		if err := cmdDoctor([]string{"--config", cfgPath}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(output, "Версия: "+versioninfo.Current()) {
+		t.Fatalf("doctor не показал идентификатор сборки: %s", output)
+	}
+	if !strings.Contains(output, "SHA исходного коммита: "+versioninfo.BuildCommit()) {
+		t.Fatalf("doctor не показал полный SHA: %s", output)
 	}
 }

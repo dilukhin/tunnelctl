@@ -5,22 +5,53 @@ import (
 	"sync/atomic"
 )
 
-var current atomic.Value
+var (
+	current     atomic.Value
+	buildCommit string
+)
 
 func init() {
 	current.Store("unknown")
 }
 
-// Set задаёт версию текущего бинарника для журналов, state и внутренних запросов.
+// Set задаёт идентификатор текущего бинарника для журналов, state и внутренних запросов.
 func Set(version string) {
 	version = strings.TrimSpace(version)
 	if version == "" || strings.ContainsAny(version, "\r\n") {
-		version = "unknown"
+		current.Store("unknown")
+		return
 	}
-	current.Store(version)
+	commit := BuildCommit()
+	if commit == "unknown" {
+		current.Store(version + ".dev")
+		return
+	}
+	current.Store(version + "." + commit[:8])
 }
 
-// Current возвращает версию текущего бинарника.
+// Current возвращает канонический идентификатор текущего бинарника.
 func Current() string {
 	return current.Load().(string)
+}
+
+// BuildCommit возвращает полный SHA исходного коммита production-сборки.
+// Для локальной сборки без внедрённого SHA возвращается "unknown".
+func BuildCommit() string {
+	commit := strings.ToLower(strings.TrimSpace(buildCommit))
+	if !validCommit(commit) {
+		return "unknown"
+	}
+	return commit
+}
+
+func validCommit(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
