@@ -2,9 +2,14 @@ package main
 
 import (
 	"errors"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
+	"tunnelctl/internal/app"
 	"tunnelctl/internal/supervisor"
+	"tunnelctl/internal/versioninfo"
 )
 
 func TestParseImportArgs(t *testing.T) {
@@ -74,5 +79,25 @@ func TestRestartStateReadyTrustsSupervisorHealthSuccess(t *testing.T) {
 	ready, err := restartStateReady(supervisor.State{Status: "работает"})
 	if err != nil || !ready {
 		t.Fatalf("ready=%v err=%v", ready, err)
+	}
+}
+
+func TestReportEarlyErrorIncludesBuildIdentity(t *testing.T) {
+	versioninfo.Set(app.Version)
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	reportEarlyError(errors.New("early failure"))
+	_ = w.Close()
+	os.Stderr = old
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "tunnelctl "+versioninfo.Current()+": early failure") {
+		t.Fatalf("ранняя ошибка не содержит идентификатор сборки: %s", data)
 	}
 }

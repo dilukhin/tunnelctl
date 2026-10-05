@@ -66,7 +66,7 @@ func TestRestartReplacesSupervisorAfterManagedStop(t *testing.T) {
 		state, err := Status(ctx)
 		cancel()
 		if err == nil && state.Status == "работает" {
-			if state.ApplicationVersion != "0.3.0-test" {
+			if state.ApplicationVersion != versioninfo.Current() {
 				t.Fatalf("версия приложения не записана в state: %#v", state)
 			}
 			break

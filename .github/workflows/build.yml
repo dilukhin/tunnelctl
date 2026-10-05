@@ -53,13 +53,25 @@ jobs:
         run: go vet ./...
 
       - name: Собрать Linux amd64
-        run: GOOS=linux GOARCH=amd64 go build -o dist/tunnelctl-linux-amd64 ./cmd/tunnelctl
+        run: GOOS=linux GOARCH=amd64 go build -ldflags "-X tunnelctl/internal/versioninfo.buildCommit=${GITHUB_SHA}" -o dist/tunnelctl-linux-amd64 ./cmd/tunnelctl
+
+      - name: Проверить идентификатор Linux-сборки
+        run: |
+          short_sha="${GITHUB_SHA:0:8}"
+          version="$(./dist/tunnelctl-linux-amd64 version)"
+          case "$version" in
+            *."$short_sha") ;;
+            *)
+              echo "Неверный идентификатор сборки: $version"
+              exit 1
+              ;;
+          esac
 
       - name: Собрать Windows amd64
-        run: GOOS=windows GOARCH=amd64 go build -o dist/tunnelctl-windows-amd64.exe ./cmd/tunnelctl
+        run: GOOS=windows GOARCH=amd64 go build -ldflags "-X tunnelctl/internal/versioninfo.buildCommit=${GITHUB_SHA}" -o dist/tunnelctl-windows-amd64.exe ./cmd/tunnelctl
 
       - name: Собрать Android arm64
-        run: GOOS=android GOARCH=arm64 go build -o dist/tunnelctl-android-arm64 ./cmd/tunnelctl
+        run: GOOS=android GOARCH=arm64 go build -ldflags "-X tunnelctl/internal/versioninfo.buildCommit=${GITHUB_SHA}" -o dist/tunnelctl-android-arm64 ./cmd/tunnelctl
 
   test-windows:
     name: Windows runtime tests
