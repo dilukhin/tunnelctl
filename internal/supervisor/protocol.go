@@ -23,6 +23,7 @@ type State struct {
 	Version            int       `json:"version"`
 	ApplicationVersion string    `json:"application_version"`
 	PID                int       `json:"pid"`
+	Watch              bool      `json:"watch,omitempty"`
 	StartedAt          time.Time `json:"started_at"`
 	OriginalTarget     string    `json:"original_target"`
 	OriginalType       string    `json:"original_type"`

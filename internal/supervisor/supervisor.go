@@ -27,11 +27,15 @@ type Options struct {
 	ConfigPath string
 	Target     string
 	Watch      bool
+	Ensure     bool
 	Runner     ProfileRunner
 }
 
 // Run запускает управляемый супервизор туннеля.
 func Run(ctx context.Context, opts Options) error {
+	if opts.Ensure && !opts.Watch {
+		return errors.New("ensure требует --watch")
+	}
 	if opts.Runner == nil {
 		opts.Runner = defaultRunner{}
 	}
@@ -52,19 +56,32 @@ func Run(ctx context.Context, opts Options) error {
 
 	server, err := listenControl()
 	if err != nil {
+		if opts.Ensure && errors.Is(err, ErrAlreadyRunning) {
+			return checkExisting(ctx, opts)
+		}
 		return err
+	}
+	if opts.Ensure {
+		if err := logx.Init(); err != nil {
+			_ = server.Close()
+			return err
+		}
+		defer logx.Close()
 	}
 
 	store := newStateStore(opts.ConfigPath, opts.Target, targetType)
-	if err := store.update(func(s *State) { s.Status = "ожидание запуска" }); err != nil {
-		_ = server.Close()
+	if err := store.update(func(s *State) {
+		s.Status = "ожидание запуска"
+		s.Watch = opts.Watch
+	}); err != nil {
 		store.remove()
+		_ = server.Close()
 		return err
 	}
 
 	runErr := runLoop(ctx, opts, profiles, targetType == "group", server, store)
-	_ = server.Close()
 	store.remove()
+	_ = server.Close()
 
 	var restartErr *restartRequestedError
 	if errors.As(runErr, &restartErr) {

@@ -45,6 +45,9 @@ func validateRestartExecutable(candidate string) (string, error) {
 
 func restartArgs(opts Options) []string {
 	args := []string{"connect", opts.Target}
+	if opts.Ensure {
+		args[0] = "ensure"
+	}
 	if opts.Watch {
 		args = append(args, "--watch")
 	} else {
