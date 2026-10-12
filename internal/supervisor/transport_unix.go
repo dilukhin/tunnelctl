@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ type unixServer struct {
 	lockFile *os.File
 	requests chan controlEnvelope
 	done     chan struct{}
+	handlers sync.WaitGroup
 }
 
 func platformListen() (controlServer, error) {
@@ -112,7 +114,11 @@ func (s *unixServer) Close() error {
 }
 
 func (s *unixServer) acceptLoop() {
-	defer close(s.requests)
+	// Канал нельзя закрывать, пока обработчик ещё может отправить в него запрос.
+	defer func() {
+		s.handlers.Wait()
+		close(s.requests)
+	}()
 	for {
 		conn, err := s.listener.AcceptUnix()
 		if err != nil {
@@ -123,7 +129,11 @@ func (s *unixServer) acceptLoop() {
 				continue
 			}
 		}
-		go s.handle(conn)
+		s.handlers.Add(1)
+		go func() {
+			defer s.handlers.Done()
+			s.handle(conn)
+		}()
 	}
 }
 
@@ -139,7 +149,10 @@ func (s *unixServer) handle(conn *net.UnixConn) {
 	envelope := controlEnvelope{Request: req, Reply: func(resp Response) { _ = json.NewEncoder(conn).Encode(resp); close(replied) }}
 	select {
 	case s.requests <- envelope:
-		<-replied
+		select {
+		case <-replied:
+		case <-s.done:
+		}
 	case <-s.done:
 		_ = json.NewEncoder(conn).Encode(Response{OK: false, Error: "управляющий канал остановлен"})
 	}
