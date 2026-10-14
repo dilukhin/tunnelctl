@@ -21,6 +21,7 @@ import java.util.UUID;
 public final class WatchdogService extends Service {
     static final String PERMISSION = "com.termux.permission.RUN_COMMAND";
     static final String STOP = "watchdog.STOP";
+    static final String BOOT_START = "watchdog.BOOT_START";
     private static final String CHANNEL = "recovery";
     private static WatchdogService instance;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -63,8 +64,17 @@ public final class WatchdogService extends Service {
                 acquireWakeLock();
                 handler.post(tick);
             }
+            if (Settings.get(this).getBoolean("boot_pending", false)) {
+                boolean manual = intent != null && !BOOT_START.equals(intent.getAction());
+                Settings.boot(this, manual ? "После сигнала служба запущена вручную."
+                        : "Служба запущена системой после сигнала загрузки или обновления.", false);
+            }
             return START_STICKY;
         } catch (IllegalArgumentException | IllegalStateException | SecurityException e) {
+            if (Settings.get(this).getBoolean("boot_pending", false)) {
+                Settings.boot(this, "Служба не запустилась после сигнала ("
+                        + e.getClass().getSimpleName() + ").", false);
+            }
             Settings.get(this).edit().putBoolean("enabled", false).commit();
             Settings.status(this, "Не удалось включить восстановление. Проверьте пути и разрешения.");
             stopSelf();
@@ -160,4 +170,6 @@ public final class WatchdogService extends Service {
     }
 
     @Override public IBinder onBind(Intent intent) { return null; }
+
+    static boolean isActive() { return instance != null && instance.started; }
 }

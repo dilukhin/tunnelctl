@@ -25,7 +25,7 @@ import (
 	"tunnelctl/internal/versioninfo"
 )
 
-const Version = "0.4.0"
+const Version = "0.4.1"
 
 func Run(args []string) error {
 	versioninfo.Set(Version)

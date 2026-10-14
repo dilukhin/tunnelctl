@@ -15,4 +15,10 @@ final class Settings {
     static void status(Context context, String text) {
         get(context).edit().putString("status", text).putLong("updated", System.currentTimeMillis()).apply();
     }
+    static void boot(Context context, String text, boolean pending) {
+        // Приёмник может завершиться сразу после onReceive: сохраняем факт доставки синхронно.
+        get(context).edit().putString("boot_status", text)
+                .putLong("boot_updated", System.currentTimeMillis())
+                .putBoolean("boot_pending", pending).commit();
+    }
 }

@@ -114,10 +114,17 @@ public final class MainActivity extends Activity {
     }
     private void refresh() {
         boolean enabled = prefs.getBoolean("enabled", false);
+        boolean active = WatchdogService.isActive();
         String time = prefs.getLong("updated", 0) == 0 ? "" :
                 "\n" + DateFormat.getDateTimeInstance().format(new Date(prefs.getLong("updated", 0)));
-        state.setText((enabled ? "Восстановление включено\n" : "Восстановление выключено\n")
-                + prefs.getString("status", "Настройте пути и разрешения.") + time);
+        String boot = prefs.getLong("boot_updated", 0) == 0 ? "\nСигнал загрузки ещё не зарегистрирован." :
+                "\nПоследний запуск после загрузки/обновления: "
+                + prefs.getString("boot_status", "нет сведений") + "\n"
+                + DateFormat.getDateTimeInstance().format(new Date(prefs.getLong("boot_updated", 0)));
+        String mode = !enabled ? "Восстановление выключено\n" : active
+                ? "Восстановление включено, служба работает\n"
+                : "Восстановление разрешено, но служба не работает. Нажмите «Включить восстановление».\n";
+        state.setText(mode + prefs.getString("status", "Настройте пути и разрешения.") + time + boot);
         binary.setEnabled(!enabled); config.setEnabled(!enabled); target.setEnabled(!enabled);
         // Повторное нажатие позволяет восстановиться после отказа запуска на загрузке.
         enable.setEnabled(true);

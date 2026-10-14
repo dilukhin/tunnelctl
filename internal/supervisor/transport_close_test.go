@@ -47,3 +47,40 @@ func TestCloseReleasesClientWaitingForReply(t *testing.T) {
 		t.Fatal("обработчики не завершились")
 	}
 }
+
+func TestSwitchReplyCanTakeLongerThanDefaultDeadline(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "run"))
+	server, err := listenControl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 16*time.Second)
+	defer cancel()
+	type result struct {
+		state State
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() { state, _, err := Switch(ctx, "next"); done <- result{state, err} }()
+	var request controlEnvelope
+	select {
+	case request = <-server.Requests():
+		if request.Request.Action != "switch" {
+			t.Fatalf("ожидался switch, получено %q", request.Request.Action)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("запрос switch не принят")
+	}
+	// Сервер должен дождаться результата SSH, хотя обычный запрос ограничен 10 с.
+	time.Sleep(11 * time.Second)
+	request.Reply(Response{OK: true, State: &State{ActiveProfile: "second"}})
+	select {
+	case got := <-done:
+		if got.err != nil || got.state.ActiveProfile != "second" {
+			t.Fatalf("ответ после 10 секунд потерян: %v, состояние %#v", got.err, got.state)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("клиент не получил ответ switch")
+	}
+}
