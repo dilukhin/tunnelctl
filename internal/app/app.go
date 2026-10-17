@@ -25,7 +25,7 @@ import (
 	"tunnelctl/internal/versioninfo"
 )
 
-const Version = "0.3.0"
+const Version = "0.4.1"
 
 func Run(args []string) error {
 	versioninfo.Set(Version)
@@ -34,6 +34,10 @@ func Run(args []string) error {
 	if len(args) > 0 && (args[0] == "version" || args[0] == "--version" || args[0] == "-v") {
 		fmt.Println("tunnelctl", versioninfo.Current())
 		return nil
+	}
+	// Частые проверки наблюдателя не должны открывать и вращать журнал владельца.
+	if len(args) > 0 && args[0] == "ensure" {
+		return cmdEnsure(args[1:])
 	}
 	if err := logx.Init(); err != nil {
 		fmt.Println("Предупреждение: не удалось включить логирование:", err)
@@ -74,6 +78,7 @@ func printHelp() {
   tunnelctl connect <имя>            подключиться к профилю или группе
   tunnelctl connect <имя> --watch    держать соединение и переподключаться
   tunnelctl connect <имя> --no-watch один запуск без автоматического повтора
+  tunnelctl ensure <имя>             сохранить владельца или запустить --watch
   tunnelctl status                   состояние управляемого туннеля и SOCKS
   tunnelctl switch <профиль>         переключиться на указанный профиль
   tunnelctl switch next              перейти к следующему профилю группы

@@ -52,6 +52,9 @@ jobs:
       - name: Запустить go vet
         run: go vet ./...
 
+      - name: Проверить гонки управления и восстановления
+        run: go test -race ./internal/supervisor
+
       - name: Собрать Linux amd64
         run: GOOS=linux GOARCH=amd64 go build -ldflags "-X tunnelctl/internal/versioninfo.buildCommit=${GITHUB_SHA}" -o dist/tunnelctl-linux-amd64 ./cmd/tunnelctl
 

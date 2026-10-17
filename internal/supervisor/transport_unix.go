@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ type unixServer struct {
 	lockFile *os.File
 	requests chan controlEnvelope
 	done     chan struct{}
+	handlers sync.WaitGroup
 }
 
 func platformListen() (controlServer, error) {
@@ -112,7 +114,11 @@ func (s *unixServer) Close() error {
 }
 
 func (s *unixServer) acceptLoop() {
-	defer close(s.requests)
+	// Канал нельзя закрывать, пока обработчик ещё может отправить в него запрос.
+	defer func() {
+		s.handlers.Wait()
+		close(s.requests)
+	}()
 	for {
 		conn, err := s.listener.AcceptUnix()
 		if err != nil {
@@ -123,23 +129,42 @@ func (s *unixServer) acceptLoop() {
 				continue
 			}
 		}
-		go s.handle(conn)
+		s.handlers.Add(1)
+		go func() {
+			defer s.handlers.Done()
+			s.handle(conn)
+		}()
 	}
 }
 
 func (s *unixServer) handle(conn *net.UnixConn) {
 	defer conn.Close()
+	// Сначала ограничиваем чтение запроса. Переключение может ждать ответа SSH
+	// дольше обычных команд, поэтому срок ответа задаём после чтения action.
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	var req Request
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
 		_ = json.NewEncoder(conn).Encode(Response{OK: false, Error: "не удалось прочитать запрос управления"})
 		return
 	}
+	responseTimeout := 10 * time.Second
+	switch req.Action {
+	case "switch":
+		responseTimeout = 50 * time.Second // клиент ждёт не более 45 с
+	case "stop":
+		responseTimeout = 25 * time.Second // клиент ждёт не более 20 с
+	case "restart":
+		responseTimeout = 20 * time.Second // клиент ждёт не более 15 с
+	}
+	_ = conn.SetDeadline(time.Now().Add(responseTimeout))
 	replied := make(chan struct{})
 	envelope := controlEnvelope{Request: req, Reply: func(resp Response) { _ = json.NewEncoder(conn).Encode(resp); close(replied) }}
 	select {
 	case s.requests <- envelope:
-		<-replied
+		select {
+		case <-replied:
+		case <-s.done:
+		}
 	case <-s.done:
 		_ = json.NewEncoder(conn).Encode(Response{OK: false, Error: "управляющий канал остановлен"})
 	}

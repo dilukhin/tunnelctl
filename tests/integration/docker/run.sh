@@ -43,6 +43,7 @@ cleanup() {
     if (( status != 0 )); then
         echo "--- tunnelctl stdout/stderr ---" >&2
         cat "$TUNNEL_LOG" >&2 2>/dev/null || true
+        cat "$XDG_STATE_HOME/tunnelctl/tunnelctl.log" >&2 2>/dev/null || true
         echo "--- docker compose logs ---" >&2
         compose logs --no-color >&2 2>/dev/null || true
     fi
@@ -185,7 +186,7 @@ cat > "$CONFIG" <<EOF_CONFIG
 EOF_CONFIG
 chmod 0600 "$CONFIG"
 
-"$BIN" connect auto --watch --config "$CONFIG" >"$TUNNEL_LOG" 2>&1 &
+"$BIN" ensure auto --config "$CONFIG" >"$TUNNEL_LOG" 2>&1 &
 TUNNEL_PID=$!
 
 wait_for_profile ssh-one
@@ -206,6 +207,25 @@ assert_socks
 echo "Проверяется явный switch ssh-two"
 "$BIN" switch ssh-two
 wait_for_profile ssh-two
+assert_socks
+
+echo "Проверяется повторный ensure без потери ручного выбора"
+ensure_output="$("$BIN" ensure auto --config "$CONFIG")"
+[[ "$ensure_output" == "TUNNELCTL_ENSURE_MANAGED_V1" ]] || fail "ensure не подтвердил владельца"
+wait_for_profile ssh-two
+assert_socks
+
+echo "Проверяется восстановление после гибели владельца и его SSH"
+old_pid="$TUNNEL_PID"
+ssh_pid="$(pgrep -P "$TUNNEL_PID" -x ssh)"
+[[ "$ssh_pid" =~ ^[0-9]+$ ]] || fail "не подтверждён единственный дочерний SSH"
+kill -KILL "$ssh_pid" "$TUNNEL_PID"
+wait "$TUNNEL_PID" 2>/dev/null || true
+TUNNEL_PID=""
+"$BIN" ensure auto --config "$CONFIG" >"$TUNNEL_LOG" 2>&1 &
+TUNNEL_PID=$!
+[[ "$TUNNEL_PID" != "$old_pid" ]] || fail "владелец не заменился"
+wait_for_profile ssh-one
 assert_socks
 
 echo "Проверяется корректный stop"
